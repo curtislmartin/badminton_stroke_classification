@@ -176,6 +176,7 @@ def _write_clips_for_video(
                 continue
 
             start_f, end_f = _compute_clip_bounds(row, clip_window, fps)
+
             clip = video.subclipped(
                 _frame_to_time(start_f, fps),
                 _frame_to_time(end_f, fps),
