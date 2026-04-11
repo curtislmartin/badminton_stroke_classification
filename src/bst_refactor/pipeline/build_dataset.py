@@ -2,17 +2,18 @@
 
 Runs all pipeline steps in sequence:
   1. Download videos from YouTube (optional, skip with --skip-download)
-  2. Build resolution CSV from downloaded videos
-  3. Generate labeled clips (all splits, both players, English folder names)
-  4. Apply class merge per active taxonomy (skip with --no-merge)
-  5. Verify clips
+  2. Build resolution CSV from downloaded videos (skip with --skip-resolution)
+  3. Generate labeled clips (skip with --skip-clips)
+  4. Apply class merge per active taxonomy (skip with --no-merge or --skip-clips)
+  5. Verify clips (skip with --skip-verify)
   6. Extract shuttle trajectories via TrackNetV3 (skip with --skip-shuttle)
 
 All paths default to pipeline.config values.
 
 Usage:
     python -m pipeline.build_dataset --tracknet-dir /path/to/TrackNetV3
-    python -m pipeline.build_dataset --skip-download --skip-shuttle
+    python -m pipeline.build_dataset --skip-download --skip-resolution --skip-shuttle
+    python -m pipeline.build_dataset --skip-clips --skip-verify --tracknet-dir TrackNetV3
     python -m pipeline.build_dataset --dry-run
 """
 import argparse
@@ -77,6 +78,9 @@ def _validate_inputs(
 
 def dry_run(
     skip_download: bool = False,
+    skip_resolution: bool = False,
+    skip_clips: bool = False,
+    skip_verify: bool = False,
     skip_shuttle: bool = False,
     no_merge: bool = False,
     tracknet_dir: Path | None = None,
@@ -85,6 +89,9 @@ def dry_run(
     """Preview what the pipeline would do without executing anything.
 
     :param skip_download: Whether the download step is skipped.
+    :param skip_resolution: Whether the resolution CSV rebuild is skipped.
+    :param skip_clips: Whether clip generation and class merge are skipped.
+    :param skip_verify: Whether verification is skipped.
     :param skip_shuttle: Whether the shuttle extraction step is skipped.
     :param no_merge: Whether class merging is skipped.
     :param tracknet_dir: Path to TrackNetV3 repo.
@@ -93,7 +100,7 @@ def dry_run(
     print('=== DRY RUN (no files will be created or moved) ===\n')
     print(f'  taxonomy: {taxonomy.name} ({taxonomy.n_classes} classes)')
 
-    skip_merge = no_merge or taxonomy.merge_map is None
+    skip_merge = skip_clips or no_merge or taxonomy.merge_map is None
     vid_count = sum(len(ids) for ids in SPLITS.values())
     split_summary = ', '.join(f'{k}={len(v)}' for k, v in SPLITS.items())
 
@@ -101,19 +108,24 @@ def dry_run(
     if not skip_merge:
         merge_detail = f'{len(taxonomy.merge_map)} subtypes merged into parents'
 
+    clip_detail = 'SKIP' if skip_clips else (
+        f'{vid_count} videos, splits: {split_summary}, '
+        f'window: {CLIP_WINDOW}, '
+        f'{len(REMOVED_SHOTS)} shots excluded, '
+        f'output: {CLIPS_OUTPUT_DIR}'
+    )
+
     steps = [
         ('1. Download videos',
          'SKIP' if skip_download else f'{vid_count} videos to {RAW_VIDEO_DIR}'),
         ('2. Build resolution CSV',
-         f'Scan {RAW_VIDEO_DIR} and write resolution CSV'),
-        ('3. Generate clips',
-         f'{vid_count} videos, splits: {split_summary}, '
-         f'window: {CLIP_WINDOW}, '
-         f'{len(REMOVED_SHOTS)} shots excluded, '
-         f'output: {CLIPS_OUTPUT_DIR}'),
+         'SKIP' if skip_resolution
+         else f'Scan {RAW_VIDEO_DIR} and write resolution CSV'),
+        ('3. Generate clips', clip_detail),
         ('4. Class merge', merge_detail),
         ('5. Verify clips',
-         'Check splits, excluded videos, removed shots, merge'),
+         'SKIP' if skip_verify
+         else 'Check splits, excluded videos, removed shots, merge'),
         ('6. Shuttle extraction',
          'SKIP' if skip_shuttle
          else f'TrackNetV3 at {tracknet_dir}'),
@@ -130,6 +142,9 @@ def dry_run(
 def run_pipeline(
     tracknet_dir: Path | None = None,
     skip_download: bool = False,
+    skip_resolution: bool = False,
+    skip_clips: bool = False,
+    skip_verify: bool = False,
     skip_shuttle: bool = False,
     no_merge: bool = False,
     force: bool = False,
@@ -144,6 +159,9 @@ def run_pipeline(
 
     :param tracknet_dir: Path to cloned TrackNetV3 repo (required for step 6).
     :param skip_download: Skip YouTube download step.
+    :param skip_resolution: Skip resolution CSV rebuild (keep existing CSV).
+    :param skip_clips: Skip clip generation (step 3) and class merge (step 4).
+    :param skip_verify: Skip verification checks (step 5).
     :param skip_shuttle: Skip TrackNetV3 shuttle extraction.
     :param no_merge: Skip class merging (keep all 19 stroke types).
     :param force: Continue to step 6 even if verification fails.
@@ -161,51 +179,61 @@ def run_pipeline(
         print('Step 1: Skipped (--skip-download)')
 
     # Step 2: Build resolution CSV (check videos exist first)
-    _step(2, 'Building resolution CSV')
-    video_files = list(RAW_VIDEO_DIR.glob('*.*'))
-    if not video_files:
-        print(f'ERROR: No video files found in {RAW_VIDEO_DIR}')
-        print('Step 1 may have failed silently. Aborting.')
-        sys.exit(1)
-    build_resolution_csv()
+    if not skip_resolution:
+        _step(2, 'Building resolution CSV')
+        video_files = list(RAW_VIDEO_DIR.glob('*.*'))
+        if not video_files:
+            print(f'ERROR: No video files found in {RAW_VIDEO_DIR}')
+            print('Step 1 may have failed silently. Aborting.')
+            sys.exit(1)
+        build_resolution_csv()
+    else:
+        print('Step 2: Skipped (--skip-resolution)')
 
     # Step 3: Generate clips (check resolution CSV exists first)
-    _step(3, 'Generating labeled clips')
-    if not RESOLUTION_CSV_PATH.exists():
-        print(f'ERROR: Resolution CSV not found: {RESOLUTION_CSV_PATH}')
-        print('Step 2 may have failed. Aborting.')
-        sys.exit(1)
-    generate_all_clips()
+    if not skip_clips:
+        _step(3, 'Generating labeled clips')
+        if not RESOLUTION_CSV_PATH.exists():
+            print(f'ERROR: Resolution CSV not found: {RESOLUTION_CSV_PATH}')
+            print('Step 2 may have failed. Aborting.')
+            sys.exit(1)
+        generate_all_clips()
+    else:
+        print('Step 3: Skipped (--skip-clips)')
 
     # Step 4: Apply class merge
-    skip_merge = no_merge or taxonomy.merge_map is None
+    skip_merge = skip_clips or no_merge or taxonomy.merge_map is None
     if not skip_merge:
         n_merges = len(taxonomy.merge_map)
         _step(4, f'Applying class merge ({n_merges} subtypes -> parents)')
         apply_class_merge(taxonomy=taxonomy)
     else:
-        print('Step 4: Skipped (no merge for this taxonomy)')
+        print('Step 4: Skipped' + (' (--skip-clips)' if skip_clips
+              else ' (no merge for this taxonomy)'))
 
     # Step 5: Verify clips
-    _step(5, 'Verifying clips')
-    clip_paths = _scan_clips(CLIPS_OUTPUT_DIR)
-    checks = [
-        verify_splits_present(CLIPS_OUTPUT_DIR, clip_paths),
-        verify_no_excluded(clip_paths),
-        verify_no_removed_shots(clip_paths),
-    ]
-    if not skip_merge:
-        checks.append(verify_merge(taxonomy=taxonomy))
-    warn_orphan_files(CLIPS_OUTPUT_DIR, clip_paths)
-    print_dataset_summary()
+    if not skip_verify:
+        _step(5, 'Verifying clips')
+        clip_paths = _scan_clips(CLIPS_OUTPUT_DIR)
+        checks = [
+            verify_splits_present(CLIPS_OUTPUT_DIR, clip_paths),
+            verify_no_excluded(clip_paths),
+            verify_no_removed_shots(clip_paths),
+        ]
+        if not skip_merge:
+            checks.append(verify_merge(taxonomy=taxonomy))
+        warn_orphan_files(CLIPS_OUTPUT_DIR, clip_paths)
+        print_dataset_summary()
 
-    if not all(checks):
-        if force:
-            print('\nWARNING: Verification failed but --force is set. Continuing.')
-        else:
-            print('\nERROR: Verification failed. Aborting before shuttle extraction.')
-            print('Use --force to continue anyway.')
-            sys.exit(1)
+        if not all(checks):
+            if force:
+                print('\nWARNING: Verification failed but --force is set. Continuing.')
+            else:
+                print('\nERROR: Verification failed. Aborting before shuttle extraction.')
+                print('Use --force to continue anyway.')
+                sys.exit(1)
+    else:
+        print('Step 5: Skipped (--skip-verify)')
 
     # Step 6: Extract shuttle trajectories
     if not skip_shuttle:
@@ -234,6 +262,12 @@ if __name__ == '__main__':
                         help='Parallel workers for downloads and TrackNetV3')
     parser.add_argument('--skip-download', action='store_true',
                         help='Skip YouTube video download step')
+    parser.add_argument('--skip-resolution', action='store_true',
+                        help='Skip resolution CSV rebuild (keep existing CSV)')
+    parser.add_argument('--skip-clips', action='store_true',
+                        help='Skip clip generation and class merge (steps 3-4)')
+    parser.add_argument('--skip-verify', action='store_true',
+                        help='Skip verification checks (step 5)')
     parser.add_argument('--skip-shuttle', action='store_true',
                         help='Skip TrackNetV3 shuttle trajectory extraction')
     parser.add_argument('--no-merge', action='store_true',
@@ -256,6 +290,9 @@ if __name__ == '__main__':
     if args.dry_run:
         dry_run(
             skip_download=args.skip_download,
+            skip_resolution=args.skip_resolution,
+            skip_clips=args.skip_clips,
+            skip_verify=args.skip_verify,
             skip_shuttle=args.skip_shuttle,
             no_merge=args.no_merge,
             tracknet_dir=args.tracknet_dir,
@@ -265,6 +302,9 @@ if __name__ == '__main__':
         run_pipeline(
             tracknet_dir=args.tracknet_dir,
             skip_download=args.skip_download,
+            skip_resolution=args.skip_resolution,
+            skip_clips=args.skip_clips,
+            skip_verify=args.skip_verify,
             skip_shuttle=args.skip_shuttle,
             no_merge=args.no_merge,
             force=args.force,

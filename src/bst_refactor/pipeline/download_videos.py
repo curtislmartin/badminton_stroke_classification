@@ -10,6 +10,7 @@ import argparse
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from pathlib import Path
 
 import cv2
@@ -174,6 +175,34 @@ def build_resolution_csv(
     df = pd.DataFrame(rows).sort_values('id').reset_index(drop=True)
     df.to_csv(output_path, index=False)
     print(f'Resolution CSV written: {output_path} ({len(df)} videos)')
+
+    # Compare found videos against the full match.csv source
+    match_csv_path = SET_INFO_DIR / 'match.csv'
+    if match_csv_path.exists():
+        expected_ids = set(pd.read_csv(match_csv_path)['id'].astype(int))
+        found_ids = set(df['id'].astype(int))
+        missing_ids = sorted(expected_ids - found_ids)
+
+        print(f'  Resolution CSV: {len(found_ids)}/{len(expected_ids)} '
+              f'expected videos found', end='')
+        if missing_ids:
+            print(f' (missing: {missing_ids})')
+        else:
+            print()
+
+        missing_txt_path = output_path.parent / 'my_raw_video_resolution_csv_missing.txt'
+        if missing_ids:
+            msg = (
+                f'On {date.today()} build_resolution_csv produced a CSV of '
+                f'{len(found_ids)} video resolution readings but '
+                f'{len(expected_ids)} were expected from match.csv.\n'
+                f'Missing video IDs: {missing_ids}\n'
+            )
+            missing_txt_path.write_text(msg)
+            print(f'  Missing video report written: {missing_txt_path}')
+        elif missing_txt_path.exists():
+            missing_txt_path.unlink()
+
     return df
 
 

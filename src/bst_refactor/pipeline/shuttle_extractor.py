@@ -24,7 +24,8 @@ from pipeline.config import (
     CLIPS_OUTPUT_DIR, SHUTTLE_OUTPUT_DIR, RESOLUTION_CSV_PATH,
 )
 
-_DEFAULT_MODEL_SUBPATH = Path('ckpts') / 'TrackNet_best.pt'
+_DEFAULT_TRACKNET_SUBPATH = Path('ckpts') / 'TrackNet_best.pt'
+_DEFAULT_INPAINTNET_SUBPATH = Path('ckpts') / 'InpaintNet_best.pt'
 
 
 def _default_csv_dir(clips_dir: Path) -> Path:
@@ -60,6 +61,7 @@ def extract_shuttle_trajectory(
     tracknet_dir: Path,
     output_csv_dir: Path,
     model_path: Path | None = None,
+    inpaintnet_path: Path | None = None,
     tracknet_python: Path | None = None,
     cur_i: int = 0,
     total: int = 0,
@@ -72,7 +74,8 @@ def extract_shuttle_trajectory(
     :param clip_path: Path to the .mp4 clip file.
     :param tracknet_dir: Path to the cloned TrackNetV3 repository.
     :param output_csv_dir: Directory to write the output CSV.
-    :param model_path: Path to model weights. Defaults to tracknet_dir/ckpts/TrackNet_best.pt.
+    :param model_path: Path to TrackNet weights. Defaults to tracknet_dir/ckpts/TrackNet_best.pt.
+    :param inpaintnet_path: Path to InpaintNet weights, or None to skip inpainting.
     :param tracknet_python: Python executable in BST venv (shared with TrackNetV3).
         Defaults to sys.executable (assumes shared environment).
     :param cur_i: Current clip index (for progress logging).
@@ -86,7 +89,9 @@ def extract_shuttle_trajectory(
         return True
 
     if model_path is None:
-        model_path = tracknet_dir / _DEFAULT_MODEL_SUBPATH
+        model_path = tracknet_dir / _DEFAULT_TRACKNET_SUBPATH
+    # inpaintnet_path=None means "no inpainting" (caller decides).
+    # extract_all_shuttles resolves the default and checks existence.
 
     # Use BST venv's Python if provided (TrackNetV3 shares BST venv)
     python_exe = str(tracknet_python) if tracknet_python else sys.executable
@@ -97,6 +102,10 @@ def extract_shuttle_trajectory(
         '--tracknet_file', str(model_path),
         '--save_dir', str(output_csv_dir),
     ]
+    # InpaintNet fills in occluded shuttle positions. Without it you're
+    # running TrackNet alone, not the full TrackNetV3 pipeline.
+    if inpaintnet_path and str(inpaintnet_path):
+        process_args.extend(['--inpaintnet_file', str(inpaintnet_path)])
 
     try:
         r = subprocess.run(process_args, capture_output=True, text=True, timeout=120)
@@ -119,6 +128,7 @@ def extract_all_shuttles(
     tracknet_dir: Path = Path('.'),
     output_csv_dir: Path | None = None,
     model_path: Path | None = None,
+    inpaintnet_path: Path | None = None,
     tracknet_python: Path | None = None,
     max_workers: int = 2,
 ) -> None:
@@ -131,7 +141,8 @@ def extract_all_shuttles(
     :param tracknet_dir: Path to the cloned TrackNetV3 repository.
     :param output_csv_dir: Directory for TrackNetV3 CSV outputs.
         Defaults to clips_dir/../shuttle_csv.
-    :param model_path: Path to model weights. Defaults to tracknet_dir/ckpts/TrackNet_best.pt.
+    :param model_path: Path to TrackNet weights. Defaults to tracknet_dir/ckpts/TrackNet_best.pt.
+    :param inpaintnet_path: Path to InpaintNet weights. Defaults to tracknet_dir/ckpts/InpaintNet_best.pt.
     :param tracknet_python: Python executable in BST venv (shared with TrackNetV3).
         Defaults to sys.executable (assumes shared environment).
     :param max_workers: Number of parallel worker processes (default 2).
@@ -142,9 +153,15 @@ def extract_all_shuttles(
     if not (tracknet_dir / 'predict.py').exists():
         raise FileNotFoundError(f'predict.py not found in: {tracknet_dir}')
 
-    resolved_model = model_path or (tracknet_dir / _DEFAULT_MODEL_SUBPATH)
+    resolved_model = model_path or (tracknet_dir / _DEFAULT_TRACKNET_SUBPATH)
     if not resolved_model.exists():
-        raise FileNotFoundError(f'Model weights not found: {resolved_model}')
+        raise FileNotFoundError(f'TrackNet weights not found: {resolved_model}')
+
+    resolved_inpaint = inpaintnet_path or (tracknet_dir / _DEFAULT_INPAINTNET_SUBPATH)
+    if not resolved_inpaint.exists():
+        print(f'  WARNING: InpaintNet weights not found: {resolved_inpaint}')
+        print(f'  Running TrackNet only (no inpainting of occluded frames)')
+        resolved_inpaint = None
 
     if output_csv_dir is None:
         output_csv_dir = _default_csv_dir(clips_dir)
@@ -163,7 +180,7 @@ def extract_all_shuttles(
             futures.append(executor.submit(
                 extract_shuttle_trajectory,
                 clip_path, tracknet_dir, output_csv_dir, model_path,
-                tracknet_python, i, len(pending),
+                resolved_inpaint, tracknet_python, i, len(pending),
             ))
         successes = sum(f.result() for f in futures)
 
@@ -260,7 +277,9 @@ def main():
     parser.add_argument('--resolution-csv', type=Path, default=RESOLUTION_CSV_PATH,
                         help='Path to video resolution CSV')
     parser.add_argument('--model-path', type=Path, default=None,
-                        help='Path to TrackNetV3 model weights (default: tracknet-dir/ckpts/TrackNet_best.pt)')
+                        help='Path to TrackNet weights (default: tracknet-dir/ckpts/TrackNet_best.pt)')
+    parser.add_argument('--inpaintnet-path', type=Path, default=None,
+                        help='Path to InpaintNet weights (default: tracknet-dir/ckpts/InpaintNet_best.pt)')
     parser.add_argument('--workers', type=int, default=2,
                         help='Parallel workers for TrackNetV3 (default 2, GPU-bound)')
     parser.add_argument('--tracknet-python', type=Path, default=None,
@@ -276,6 +295,7 @@ def main():
             tracknet_dir=args.tracknet_dir,
             output_csv_dir=args.csv_dir,
             model_path=args.model_path,
+            inpaintnet_path=args.inpaintnet_path,
             tracknet_python=args.tracknet_python,
             max_workers=args.workers,
         )

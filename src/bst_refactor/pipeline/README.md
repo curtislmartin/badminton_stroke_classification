@@ -24,7 +24,7 @@ python -m pipeline.build_dataset --tracknet-dir TrackNetV3 \
 | OpenCV | `pip install opencv-python` | Step 2: resolution scanning |
 | MoviePy | `pip install moviepy` | Step 3: clip generation |
 | pandas, numpy | `pip install pandas numpy` | All steps |
-| TrackNetV3 | Included in repo + pretrained weights (see Step 6). Shares BST venv. | Step 6: shuttle extraction (optional) |
+| TrackNetV3 | Included in repo (inference only). **Pretrained weights (~150 MB) must be downloaded separately** — see Step 6. Shares BST venv. | Step 6: shuttle extraction (optional) |
 
 ## Pipeline Steps
 
@@ -87,14 +87,35 @@ Runs TrackNetV3 on each clip to extract shuttle trajectories, then normalizes to
 
 TrackNetV3 shares the BST training venv (`stroke_classification/requirements.txt`) rather than maintaining a separate environment. The original repo's dependencies (torch 1.10, numpy 1.22) are incompatible with Python 3.11 and CUDA 12.1; the code has been verified to work with torch 2.3.1. See `TrackNetV3/requirements.txt` for the full version rationale and standalone setup instructions.
 
-The pipeline calls `predict.py` as a subprocess, so TrackNetV3's imports don't affect the pipeline venv. Point `--tracknet-python` at the BST venv's Python:
+The pipeline calls `predict.py` as a subprocess, so TrackNetV3's imports don't affect the pipeline venv. Point `--tracknet-python` at the BST venv's Python.
+
+#### One-time setup
+
+1. **Download pretrained weights** from [Google Drive](https://drive.google.com/file/d/1CfzE87a0f6LhBp0kniSl1-89zaLCZ8cA/view?usp=sharing) (~150 MB zip). These are too large for the git repo (`ckpts/` is gitignored).
+
+   ```bash
+   cd TrackNetV3
+   pip install gdown              # if not already installed
+   gdown 1CfzE87a0f6LhBp0kniSl1-89zaLCZ8cA
+   unzip TrackNetV3_ckpts.zip -d ckpts/
+   # Expected: ckpts/TrackNet_best.pt, ckpts/InpaintNet_best.pt
+   ```
+
+   Without InpaintNet weights the pipeline will warn and fall back to TrackNet-only (no gap-filling for occluded frames). Without TrackNet weights step 6 will fail.
+
+2. **Create output directories.** Step 6 writes intermediate CSVs to `ShuttleSet/shuttle_csv/` and final `.npy` files to `ShuttleSet/shuttle_npy/`. On HPC nodes these should live on scratch storage and be symlinked:
+
+   ```bash
+   # Example for engelbart (adjust paths for your setup)
+   mkdir -p /scratch/comp320a/ShuttleSet/shuttle_csv
+   mkdir -p /scratch/comp320a/ShuttleSet/shuttle_npy
+   ln -s /scratch/comp320a/ShuttleSet/shuttle_csv ShuttleSet/shuttle_csv
+   ln -s /scratch/comp320a/ShuttleSet/shuttle_npy ShuttleSet/shuttle_npy
+   ```
+
+#### Running
 
 ```bash
-# Download pretrained weights (one-time)
-cd TrackNetV3
-# Download from: https://drive.google.com/file/d/1CfzE87a0f6LhBp0kniSl1-89zaLCZ8cA/view?usp=sharing
-unzip TrackNetV3_ckpts.zip   # creates ckpts/TrackNet_best.pt, ckpts/InpaintNet_best.pt
-
 # Run from the pipeline's own venv
 python -m pipeline.shuttle_extractor --tracknet-dir TrackNetV3 \
     --tracknet-python /path/to/bst-venv/bin/python --workers 2
@@ -117,11 +138,33 @@ python -m pipeline.build_dataset [OPTIONS]
 --tracknet-python PATH Python executable in BST venv (default: sys.executable)
 --workers N            Parallel workers (default 2, safe for shared GPU nodes)
 --skip-download        Skip YouTube download (videos must already exist)
+--skip-resolution      Skip resolution CSV rebuild (keep existing CSV)
+--skip-clips           Skip clip generation and class merge (steps 3-4)
+--skip-verify          Skip verification checks (step 5)
 --skip-shuttle         Skip TrackNetV3 shuttle extraction
 --no-merge             Keep all 19 stroke types (skip class merging)
 --taxonomy NAME        Stroke type taxonomy: 'une_merge_v1' (default), 'merged_25', or 'raw_35'
 --dry-run              Preview what the pipeline would do without executing
 --force                Continue past verification failures
+```
+
+### Resuming after a crash
+
+Class merge (step 4) is destructive — it moves clips from subtype folders (e.g. `Top_wrist_smash/`) into parent folders (e.g. `Top_smash/`) and removes the source folders. If the pipeline crashes after step 4 and you re-run without `--skip-clips`, step 3 will not find the merged clips at their original paths and will **re-generate them from video** (hours of re-encoding).
+
+To resume safely after steps 3-5 have completed:
+
+```bash
+# Skip straight to shuttle extraction (step 6)
+python -m pipeline.build_dataset \
+    --skip-download --skip-resolution --skip-clips --skip-verify \
+    --tracknet-dir TrackNetV3 \
+    --tracknet-python /path/to/bst-venv/bin/python
+
+# Or run step 6 directly via its own CLI
+python -m pipeline.shuttle_extractor \
+    --tracknet-dir TrackNetV3 \
+    --tracknet-python /path/to/bst-venv/bin/python
 ```
 
 ## Output Structure
@@ -135,7 +178,9 @@ ShuttleSet/
     train/{Top,Bottom}_{stroke_type}/*.mp4
     val/{Top,Bottom}_{stroke_type}/*.mp4
     test/{Top,Bottom}_{stroke_type}/*.mp4
-  shuttle_npy/                                  # Step 6
+  shuttle_csv/                                  # Step 6 (intermediate)
+    {vid}_{set}_{rally}_{ball_round}_ball.csv
+  shuttle_npy/                                  # Step 6 (final)
     train/{Top,Bottom}_{stroke_type}/*.npy
     val/{Top,Bottom}_{stroke_type}/*.npy
     test/{Top,Bottom}_{stroke_type}/*.npy

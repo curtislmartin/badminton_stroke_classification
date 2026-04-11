@@ -48,6 +48,11 @@ python -m pipeline.build_dataset --skip-shuttle            # download + clips + 
 python -m pipeline.build_dataset --skip-download \
     --tracknet-dir TrackNetV3 \
     --tracknet-python /path/to/venv-bst/bin/python
+# Resume after crash (skip completed steps 3-5, run only shuttle extraction)
+python -m pipeline.build_dataset \
+    --skip-download --skip-resolution --skip-clips --skip-verify \
+    --tracknet-dir TrackNetV3 \
+    --tracknet-python /path/to/venv-bst/bin/python
 
 # ── Stage 2: Pose estimation (MMPose venv) ──────────────────────────
 source venv-mmpose/bin/activate
@@ -68,7 +73,7 @@ python bst_train.py                                        # train (5 serial tri
 python bst_infer.py                                        # inference
 ```
 
-Each stage's output feeds the next. Stages are independently re-runnable — use `--skip-*` flags to avoid repeating completed work.
+Each stage's output feeds the next. Stages are independently re-runnable — use `--skip-*` flags to avoid repeating completed work. **Important:** after class merge (step 4) has run, always pass `--skip-clips` on re-runs to avoid re-generating clips that were moved into merged folders.
 
 ---
 
@@ -83,12 +88,12 @@ The pipeline downloads match videos, cuts them into labeled stroke clips, option
 | Module | Role | Key functions / concepts |
 |--------|------|--------------------------|
 | `config.py` | Single source of truth for paths, stroke types, splits, flaw records, and merge rules. Every other pipeline module imports from here. | `Taxonomy` (frozen dataclass with `class_list()`, `n_classes`, `merge_map`, `standalone_set`), `TAXONOMIES` (dict of named taxonomies: `'une_merge_v1'`, `'merged_25'`, `'raw_35'`), `DEFAULT_TAXONOMY` (name of the default taxonomy, currently `'une_merge_v1'`), `UNPREFIXED_TYPES` (frozenset of raw types that never get Top_/Bottom_ prefixed folders during clip generation), `SPLITS` (train/val/test video ID lists, auto-stripped of excluded videos), `UNE_MERGE_V1_MAP` (default 19 -> 14 class reduction), `MERGE_MAP` (legacy 19 -> 12 class reduction), `EN_TO_ZH` / `ZH_TO_EN` (English-Chinese name mapping for CSV I/O only), `parse_flaw_records()` (reads `flaw_shot_records.csv` to populate `EXCLUDED_VIDEOS` and `REMOVED_SHOTS`). |
-| `build_dataset.py` | One-command orchestrator. Runs steps 1-6 in order with CLI flags to skip individual steps. | `run_pipeline()` (main entry point), `dry_run()` (preview without side effects), `_validate_inputs()` (fail-fast checks before long work). |
+| `build_dataset.py` | One-command orchestrator. Runs steps 1-6 in order with CLI flags to skip individual steps (`--skip-download`, `--skip-resolution`, `--skip-clips`, `--skip-verify`, `--skip-shuttle`). `--skip-clips` skips both clip generation (step 3) and class merge (step 4) since they are tightly coupled: the merge moves clips out of their original folders, so re-running step 3 after a merge would re-generate them from video. | `run_pipeline()` (main entry point), `dry_run()` (preview without side effects), `_validate_inputs()` (fail-fast checks before long work). |
 | `download_videos.py` | Downloads 40 ShuttleSet match videos from YouTube via yt-dlp. Also builds a resolution CSV by scanning each video with OpenCV. | `download_all_videos(max_workers)`, `build_resolution_csv()`. Output: `ShuttleSet/raw_video/{id} {match_name}.mp4` and `ShuttleSet/my_raw_video_resolution.csv`. |
 | `clip_generator.py` | Extracts individual stroke clips from full match videos. Reads ShuttleSet CSV annotations (Chinese column names), maps A/B players to Top/Bottom, filters excluded videos and removed shots, and organizes clips into `{split}/{Player}_{stroke_type}/` folders. | `generate_all_clips()`, `apply_class_merge()` (moves clips from rare subtype folders into their parent type folders per the active taxonomy's merge map). Three clip window modes: `middle_in_a_sec`, `between_2_hits`, `between_2_hits_with_max_limits` (default, clamps to 1.5s each side). |
 | `player_mapping.py` | Maps the A/B player labels in ShuttleSet annotations to Top/Bottom court positions. Handles set-3 court switches. | `get_top_bottom_mapping(video_id, set_num)`. |
 | `verify.py` | Post-generation sanity checks: all splits present, no clips from excluded videos, no removed shots, merged subtype folders empty, no orphan files. | `verify_splits_present()`, `verify_no_excluded()`, `verify_no_removed_shots()`, `verify_class_merge()`, `verify_shuttle_sync()`, `print_dataset_summary()`. |
-| `shuttle_extractor.py` | Runs TrackNetV3 on each clip to detect shuttle positions, then converts CSVs to normalized `(t, 3)` numpy arrays `[x_norm, y_norm, visibility]`. TrackNetV3 shares the BST training venv and is called as a subprocess via `--tracknet-python`. | `extract_all_shuttles(tracknet_dir, tracknet_python, max_workers)`, `shuttle_csvs_to_npy()`. Output: `ShuttleSet/shuttle_npy/{split}/{Player}_{stroke_type}/{clip}.npy`. |
+| `shuttle_extractor.py` | Runs TrackNetV3 on each clip to detect shuttle positions, then converts CSVs to normalized `(t, 3)` numpy arrays `[x_norm, y_norm, visibility]`. TrackNetV3 shares the BST training venv and is called as a subprocess via `--tracknet-python`. **Pretrained weights** (`ckpts/TrackNet_best.pt`, `ckpts/InpaintNet_best.pt`) must be downloaded separately (~150 MB, gitignored) — see `TrackNetV3/README.md`. | `extract_all_shuttles(tracknet_dir, tracknet_python, max_workers)`, `shuttle_csvs_to_npy()`. Intermediate output: `ShuttleSet/shuttle_csv/` (flat dir of per-clip CSVs). Final output: `ShuttleSet/shuttle_npy/{split}/{Player}_{stroke_type}/{clip}.npy`. |
 | `court_utils.py` | Optional. Homography-based camera-to-court coordinate projection. Not required for the core pipeline. | `project_to_court()`, `normalize_court_position()`. |
 
 #### Pipeline output structure
@@ -101,6 +106,8 @@ ShuttleSet/
     train/{Top,Bottom}_{type}/*.mp4
     val/{Top,Bottom}_{type}/*.mp4
     test/{Top,Bottom}_{type}/*.mp4
+  shuttle_csv/                       # TrackNetV3 intermediate CSVs
+    {vid}_{set}_{rally}_{ball_round}_ball.csv
   shuttle_npy/                       # Shuttle trajectories (optional)
     train/{Top,Bottom}_{type}/*.npy
     val/{Top,Bottom}_{type}/*.npy
@@ -112,6 +119,7 @@ ShuttleSet/
 - **Class merging**: The default taxonomy (`une_merge_v1`) folds 4 rare subtypes into parent types, reducing 19 raw types to 14 merged types (29 classes with Top/Bottom prefixes + `unknown`). The legacy `merged_25` taxonomy folds 6 subtypes down to 12 types (25 classes). The `raw_35` taxonomy applies no merging (35 classes).
 - **Flaw records**: `flaw_shot_records.csv` is the single source of truth for data exclusions. Whole-video exclusions and individual shot removals are parsed at import time.
 - **Clip windows**: Control how much temporal context surrounds each stroke. `between_2_hits_with_max_limits` (default) uses the interval between adjacent shots, clamped to 1.5s per side.
+- **Homography resolution**: The pre-computed homography matrices in `ShuttleSet/set/homography.csv` were calculated at 1280x720. `court_utils.scale_pos_by_resolution()` rescales coordinates from the video's native resolution to 1280x720 before applying the homography. This quantization is negligible for court-position features (~1cm precision on a 13m court), but worth keeping in mind if homography-derived coordinates are ever combined with features extracted at native resolution (e.g., shuttle trajectory positions relative to a video crop). In practice any mismatch would be sub-pixel at typical crop sizes and likely acts as minor augmentation noise.
 - **Video resolution**: The pipeline downloads the best available mp4 (video-only, no audio). Downstream models resize frames internally — TrackNetV3 to 512x288 (`TrackNetV3/utils/general.py`), MMPose to ~256x192 depending on model config — so resolutions above 720p provide no practical benefit while increasing file size and processing time.
 
 ---
