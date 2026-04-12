@@ -14,7 +14,6 @@ Usage:
 import argparse
 import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -131,11 +130,17 @@ def extract_all_shuttles(
     inpaintnet_path: Path | None = None,
     tracknet_python: Path | None = None,
     max_workers: int = 2,
+    batch_size: int = 32,
 ) -> None:
-    """Run TrackNetV3 on all clips in parallel.
+    """Run TrackNetV3 on all clips using batch mode.
 
-    Note: max_workers should be modest since TrackNetV3 is GPU-bound.
-    Default is 2 to avoid CUDA OOM on shared nodes.
+    Uses batch_predict.py to load models once per worker and iterate
+    over clips in-process, avoiding the ~8s model-reload overhead per
+    clip that subprocess-per-clip mode incurred.
+
+    Each worker loads its own model copy onto the GPU, so max_workers > 1
+    requires enough VRAM for multiple models (e.g. A100 40GB). On V100
+    16GB, use max_workers=1.
 
     :param clips_dir: Root clips directory to scan for .mp4 files.
     :param tracknet_dir: Path to the cloned TrackNetV3 repository.
@@ -145,7 +150,10 @@ def extract_all_shuttles(
     :param inpaintnet_path: Path to InpaintNet weights. Defaults to tracknet_dir/ckpts/InpaintNet_best.pt.
     :param tracknet_python: Python executable in BST venv (shared with TrackNetV3).
         Defaults to sys.executable (assumes shared environment).
-    :param max_workers: Number of parallel worker processes (default 2).
+    :param max_workers: Number of parallel batch workers (default 2).
+        Each worker loads its own model copy — needs enough GPU memory.
+    :param batch_size: Batch size for TrackNet DataLoader (default 32).
+        Safe at 32 with max_workers=2; use 64 with max_workers=1.
     """
     # Preflight: verify TrackNetV3 is set up correctly
     if not tracknet_dir.is_dir():
@@ -173,18 +181,61 @@ def extract_all_shuttles(
                if not (output_csv_dir / (c.stem + '_ball.csv')).exists()]
 
     print(f'TrackNetV3 extraction: {len(pending)} pending of {len(all_clips)} total clips')
+    if not pending:
+        return
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-        for i, clip_path in enumerate(pending, 1):
-            futures.append(executor.submit(
-                extract_shuttle_trajectory,
-                clip_path, tracknet_dir, output_csv_dir, model_path,
-                resolved_inpaint, tracknet_python, i, len(pending),
-            ))
-        successes = sum(f.result() for f in futures)
+    # Split pending clips across workers (round-robin so each worker
+    # processes a mix of short and long clips from different videos).
+    chunks = [pending[i::max_workers] for i in range(max_workers)]
+    chunks = [c for c in chunks if c]  # drop empty if fewer clips than workers
 
-    print(f'Extraction complete: {successes}/{len(pending)} succeeded')
+    python_exe = str(tracknet_python) if tracknet_python else sys.executable
+    batch_script = tracknet_dir / 'batch_predict.py'
+
+    # Write each chunk to its own list file and launch a batch worker
+    list_files = []
+    processes = []
+    for worker_i, chunk in enumerate(chunks):
+        list_file = output_csv_dir / f'_pending_clips_{worker_i}.txt'
+        list_file.write_text('\n'.join(str(p) for p in chunk))
+        list_files.append(list_file)
+
+        process_args = [
+            python_exe, str(batch_script),
+            '--video_list', str(list_file),
+            '--tracknet_file', str(resolved_model),
+            '--save_dir', str(output_csv_dir),
+            '--batch_size', str(batch_size),
+        ]
+        if resolved_inpaint:
+            process_args.extend(['--inpaintnet_file', str(resolved_inpaint)])
+
+        # stdout goes directly to terminal (avoids pipe-buffer deadlock
+        # when multiple workers produce lots of output concurrently).
+        # stderr is piped so we can report errors.
+        proc = subprocess.Popen(process_args, text=True,
+                                stderr=subprocess.PIPE)
+        processes.append(proc)
+
+    print(f'Launched {len(processes)} batch worker(s)')
+
+    # Wait for all workers
+    try:
+        for proc in processes:
+            proc.wait()
+            if proc.returncode != 0:
+                print(f'WARNING: worker exited with code {proc.returncode}')
+                stderr = proc.stderr.read()
+                if stderr:
+                    print(stderr[:500])
+    finally:
+        for f in list_files:
+            f.unlink(missing_ok=True)
+
+    # Count results from disk (authoritative, regardless of worker output)
+    done = sum(1 for c in all_clips
+               if (output_csv_dir / (c.stem + '_ball.csv')).exists())
+    print(f'Extraction complete: {done}/{len(all_clips)} clips have CSVs')
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +333,8 @@ def main():
                         help='Path to InpaintNet weights (default: tracknet-dir/ckpts/InpaintNet_best.pt)')
     parser.add_argument('--workers', type=int, default=2,
                         help='Parallel workers for TrackNetV3 (default 2, GPU-bound)')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='Batch size for TrackNet DataLoader (default 32, use 64 with --workers 1)')
     parser.add_argument('--tracknet-python', type=Path, default=None,
                         help='Python executable in BST venv (shared with TrackNetV3)')
     parser.add_argument('--skip-extraction', action='store_true',
@@ -298,6 +351,7 @@ def main():
             inpaintnet_path=args.inpaintnet_path,
             tracknet_python=args.tracknet_python,
             max_workers=args.workers,
+            batch_size=args.batch_size,
         )
 
     print('\n=== Converting shuttle CSVs to NPY ===')

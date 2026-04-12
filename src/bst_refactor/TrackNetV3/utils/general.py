@@ -199,11 +199,17 @@ def get_rally_dirs(data_dir, split):
     
     return rally_dirs
 
-def generate_frames(video_file):
+def generate_frames(video_file, resize_to=None):
     """ Sample frames from the video.
 
         Args:
             video_file (str): File path of the video file
+            resize_to (tuple or None): (width, height) to resize each frame
+                during loading with cv2 INTER_CUBIC (bicubic), matching the
+                interpolation quality of PIL's default bicubic used in the
+                Dataset. Avoids storing full-resolution frames when the
+                downstream consumer (e.g. TrackNet) will resize anyway.
+                Not bit-identical to PIL but same interpolation method.
 
         Returns:
             frame_list (List[numpy.ndarray]): List of sampled frames
@@ -220,8 +226,11 @@ def generate_frames(video_file):
     while success:
         success, frame = cap.read()
         if success:
+            if resize_to is not None:
+                frame = cv2.resize(frame, resize_to,
+                                   interpolation=cv2.INTER_CUBIC)
             frame_list.append(frame)
-            
+
     return frame_list
 
 def draw_traj(img, traj, radius=3, color='red'):

@@ -149,6 +149,7 @@ def run_pipeline(
     no_merge: bool = False,
     force: bool = False,
     workers: int = 2,
+    batch_size: int = 32,
     tracknet_python: Path | None = None,
     taxonomy: Taxonomy = TAXONOMY_UNE_MERGE_V1,
 ) -> None:
@@ -166,6 +167,7 @@ def run_pipeline(
     :param no_merge: Skip class merging (keep all 19 stroke types).
     :param force: Continue to step 6 even if verification fails.
     :param workers: Parallel workers for downloads and TrackNetV3 (default 2).
+    :param batch_size: Batch size for TrackNet DataLoader (default 32).
     :param tracknet_python: Python executable in BST venv (shared with TrackNetV3).
     :param taxonomy: Taxonomy to use for class merging.
     """
@@ -242,6 +244,7 @@ def run_pipeline(
             tracknet_dir=tracknet_dir,
             tracknet_python=tracknet_python,
             max_workers=workers,
+            batch_size=batch_size,
         )
         print()
         shuttle_csvs_to_npy()
@@ -260,6 +263,8 @@ if __name__ == '__main__':
                         help='Path to cloned TrackNetV3 repository')
     parser.add_argument('--workers', type=int, default=2,
                         help='Parallel workers for downloads and TrackNetV3')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='Batch size for TrackNet DataLoader (default 32, use 64 with --workers 1)')
     parser.add_argument('--skip-download', action='store_true',
                         help='Skip YouTube video download step')
     parser.add_argument('--skip-resolution', action='store_true',
@@ -309,6 +314,7 @@ if __name__ == '__main__':
             no_merge=args.no_merge,
             force=args.force,
             workers=args.workers,
+            batch_size=args.batch_size,
             tracknet_python=args.tracknet_python,
             taxonomy=taxonomy,
         )
