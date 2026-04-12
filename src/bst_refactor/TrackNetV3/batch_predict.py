@@ -12,8 +12,11 @@ Usage:
         --save_dir /path/to/shuttle_csv
 """
 import argparse
+import gc
 import sys
 from pathlib import Path
+
+import torch
 
 from predict import load_models, predict_video
 
@@ -35,6 +38,8 @@ def main():
     parser.add_argument('--eval_mode', type=str, default='weight',
                         choices=['nonoverlap', 'average', 'weight'],
                         help='Temporal ensemble mode (default: weight)')
+    parser.add_argument('--dry_run', action='store_true', default=False,
+                        help='Run inference without writing output files')
     args = parser.parse_args()
 
     # Load models once (the whole point of batch mode)
@@ -57,22 +62,28 @@ def main():
 
         # Skip already-done clips (resumable after crash)
         stem = Path(video_file).stem
-        out_csv = Path(args.save_dir) / f'{stem}_ball.csv'
-        if out_csv.exists():
-            skipped += 1
-            continue
+        if not args.dry_run:
+            out_csv = Path(args.save_dir) / f'{stem}_ball.csv'
+            if out_csv.exists():
+                skipped += 1
+                continue
 
+        print(f'PROCESSING ({i}/{total}) {stem}', flush=True)
         try:
             predict_video(
                 video_file, tracknet, inpaintnet, t_seq, i_seq, bg_mode,
                 args.save_dir, eval_mode=args.eval_mode,
-                batch_size=args.batch_size,
+                batch_size=args.batch_size, dry_run=args.dry_run,
             )
             successes += 1
         except Exception as e:
             print(f'ERROR ({i}/{total}) {stem}: {e}', file=sys.stderr,
                   flush=True)
             failures += 1
+
+        # Free frame arrays and CUDA cache between clips
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # Progress line (parseable by shuttle_extractor)
         print(f'BATCH_PROGRESS ({i}/{total}) {stem}', flush=True)

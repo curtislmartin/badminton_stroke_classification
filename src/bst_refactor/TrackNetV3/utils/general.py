@@ -204,12 +204,10 @@ def generate_frames(video_file, resize_to=None):
 
         Args:
             video_file (str): File path of the video file
-            resize_to (tuple or None): (width, height) to resize each frame
-                during loading with cv2 INTER_CUBIC (bicubic), matching the
-                interpolation quality of PIL's default bicubic used in the
-                Dataset. Avoids storing full-resolution frames when the
-                downstream consumer (e.g. TrackNet) will resize anyway.
-                Not bit-identical to PIL but same interpolation method.
+            resize_to (tuple or None): (width, height) to pre-resize each
+                frame using PIL BICUBIC -- the same interpolation the Dataset
+                uses in __getitem__, so pre-resizing here makes the Dataset
+                resize a no-op while producing bit-identical results.
 
         Returns:
             frame_list (List[numpy.ndarray]): List of sampled frames
@@ -227,10 +225,13 @@ def generate_frames(video_file, resize_to=None):
         success, frame = cap.read()
         if success:
             if resize_to is not None:
-                frame = cv2.resize(frame, resize_to,
-                                   interpolation=cv2.INTER_CUBIC)
+                # PIL BICUBIC matches Dataset.__getitem__ (which also uses
+                # Image.fromarray().resize()). Bicubic is per-channel so
+                # BGR vs RGB order doesn't affect interpolated values.
+                frame = np.array(Image.fromarray(frame).resize(resize_to))
             frame_list.append(frame)
 
+    cap.release()
     return frame_list
 
 def draw_traj(img, traj, radius=3, color='red'):

@@ -106,7 +106,7 @@ def predict_video(video_file, tracknet, inpaintnet,
                   tracknet_seq_len, inpaintnet_seq_len, bg_mode,
                   save_dir, eval_mode='weight', batch_size=16,
                   large_video=False, max_sample_num=1800, video_range=None,
-                  output_video=False, traj_len=8):
+                  output_video=False, traj_len=8, dry_run=False):
     """Run TrackNet (+ InpaintNet) inference on one video and write CSV.
 
     This is the per-video inference loop extracted from __main__.
@@ -128,6 +128,7 @@ def predict_video(video_file, tracknet, inpaintnet,
         video_range (list or None): [start_sec, end_sec] (large_video only).
         output_video (bool): Write annotated output video (default False).
         traj_len (int): Trajectory length for video annotation (default 8).
+        dry_run (bool): Run inference but skip writing CSV/video (default False).
     """
     # Workers=0: frames are already in a NumPy array in RAM, so spawning
     # subprocesses just to index into it adds overhead for short clips.
@@ -142,6 +143,7 @@ def predict_video(video_file, tracknet, inpaintnet,
 
     cap = cv2.VideoCapture(video_file)
     w, h = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    cap.release()
     w_scaler, h_scaler = w / WIDTH, h / HEIGHT
     img_scaler = (w_scaler, h_scaler)
 
@@ -159,8 +161,8 @@ def predict_video(video_file, tracknet, inpaintnet,
             data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False)
             print(f'Video length: {dataset.video_len}')
         else:
-            # Sample all frames from video (pre-resize to avoid storing
-            # full-resolution frames — Dataset would resize anyway)
+            # Sample all frames from video (pre-resize with PIL to match
+            # the Dataset's own PIL BICUBIC resize, making it a no-op)
             frame_list = generate_frames(video_file, resize_to=(WIDTH, HEIGHT))
             dataset = Shuttlecock_Trajectory_Dataset(seq_len=seq_len, sliding_step=seq_len, data_mode='heatmap', bg_mode=bg_mode,
                                                  frame_arr=np.array(frame_list)[:, :, :, ::-1], padding=True)
@@ -168,7 +170,7 @@ def predict_video(video_file, tracknet, inpaintnet,
 
         for step, (i, x) in enumerate(tqdm(data_loader)):
             x = x.float().cuda()
-            with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
+            with torch.no_grad():
                 y_pred = tracknet(x).detach().cpu()
 
             # Predict
@@ -185,8 +187,8 @@ def predict_video(video_file, tracknet, inpaintnet,
             print(f'Video length: {video_len}')
 
         else:
-            # Sample all frames from video (pre-resize to avoid storing
-            # full-resolution frames — Dataset would resize anyway)
+            # Sample all frames from video (pre-resize with PIL to match
+            # the Dataset's own PIL BICUBIC resize, making it a no-op)
             frame_list = generate_frames(video_file, resize_to=(WIDTH, HEIGHT))
             dataset = Shuttlecock_Trajectory_Dataset(seq_len=seq_len, sliding_step=1, data_mode='heatmap', bg_mode=bg_mode,
                                                  frame_arr=np.array(frame_list)[:, :, :, ::-1])
@@ -203,7 +205,7 @@ def predict_video(video_file, tracknet, inpaintnet,
         for step, (i, x) in enumerate(tqdm(data_loader)):
             x = x.float().cuda()
             b_size, seq_len = i.shape[0], i.shape[1]
-            with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
+            with torch.no_grad():
                 y_pred = tracknet(x).detach().cpu()
 
             y_pred_buffer = torch.cat((y_pred_buffer, y_pred), dim=0)
@@ -256,7 +258,7 @@ def predict_video(video_file, tracknet, inpaintnet,
 
             for step, (i, coor_pred, inpaint_mask) in enumerate(tqdm(data_loader)):
                 coor_pred, inpaint_mask = coor_pred.float(), inpaint_mask.float()
-                with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
+                with torch.no_grad():
                     coor_inpaint = inpaintnet(coor_pred.cuda(), inpaint_mask.cuda()).detach().cpu()
                     coor_inpaint = coor_inpaint * inpaint_mask + coor_pred * (1-inpaint_mask) # replace predicted coordinates with inpainted coordinates
 
@@ -285,7 +287,7 @@ def predict_video(video_file, tracknet, inpaintnet,
             for step, (i, coor_pred, inpaint_mask) in enumerate(tqdm(data_loader)):
                 coor_pred, inpaint_mask = coor_pred.float(), inpaint_mask.float()
                 b_size = i.shape[0]
-                with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
+                with torch.no_grad():
                     coor_inpaint = inpaintnet(coor_pred.cuda(), inpaint_mask.cuda()).detach().cpu()
                     coor_inpaint = coor_inpaint * inpaint_mask + coor_pred * (1-inpaint_mask)
 
@@ -336,6 +338,13 @@ def predict_video(video_file, tracknet, inpaintnet,
 
     # Write csv file
     pred_dict = inpaint_pred_dict if inpaintnet is not None else tracknet_pred_dict
+
+    if dry_run:
+        n_frames = len(pred_dict['Frame'])
+        n_visible = sum(pred_dict['Visibility'])
+        print(f'DRY_RUN {video_name}: {n_frames} frames, {n_visible} detections')
+        return
+
     write_pred_csv(pred_dict, save_file=out_csv_file)
 
     # Write video with predicted coordinates

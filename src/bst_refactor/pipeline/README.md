@@ -87,7 +87,7 @@ Runs TrackNetV3 on each clip to extract shuttle trajectories, then normalizes to
 
 TrackNetV3 shares the BST training venv (`stroke_classification/requirements.txt`) rather than maintaining a separate environment. The original repo's dependencies (torch 1.10, numpy 1.22) are incompatible with Python 3.11 and CUDA 12.1; the code has been verified to work with torch 2.3.1. See `TrackNetV3/requirements.txt` for the full version rationale and standalone setup instructions.
 
-The pipeline calls TrackNetV3 as a subprocess via `batch_predict.py`, which loads models once and iterates over all clips in-process. This avoids the ~8s model-reload overhead per clip that the old subprocess-per-clip approach had. The pipeline passes `--batch_size` (default 32; configurable via `--batch-size`) and uses the default `eval_mode='weight'` (full temporal ensemble) for maximum detection accuracy. Inference runs in FP16 via `torch.autocast` to leverage V100 tensor cores, and frames are pre-resized during loading to avoid redundant full-resolution array operations. TrackNetV3's imports don't affect the pipeline venv. Point `--tracknet-python` at the BST venv's Python.
+The pipeline calls TrackNetV3 as a subprocess via `batch_predict.py`, which loads models once and iterates over all clips in-process. This avoids the ~8s model-reload overhead per clip that the old subprocess-per-clip approach had. The pipeline passes `--batch_size` (default 32; configurable via `--batch-size`) and uses the default `eval_mode='weight'` (full temporal ensemble) for maximum detection accuracy. Inference runs in FP32 to preserve detection accuracy on fast-moving shuttles (>400 km/h at 25-30fps produces faint heatmap responses where FP16 rounding could flip the 0.5 visibility threshold). Frames are pre-resized during loading using PIL BICUBIC, which is bit-identical to the Dataset's own resize and avoids redundant full-resolution array operations. VideoCapture handles are explicitly released after use, and `gc.collect()` + `torch.cuda.empty_cache()` run between clips to prevent resource exhaustion over long batch runs. TrackNetV3's imports don't affect the pipeline venv. Point `--tracknet-python` at the BST venv's Python.
 
 #### One-time setup
 
@@ -118,10 +118,18 @@ The pipeline calls TrackNetV3 as a subprocess via `batch_predict.py`, which load
 ```bash
 # Run from the pipeline's own venv (batch mode, single GPU)
 python -m pipeline.shuttle_extractor --tracknet-dir TrackNetV3 \
-    --tracknet-python /path/to/bst-venv/bin/python --workers 1 --batch-size 64
+    --tracknet-python /path/to/bst-venv/bin/python --workers 1 --batch-size 16
+
+# Retry any OOM failures with a smaller batch size (resume picks up where it left off)
+python -m pipeline.shuttle_extractor --tracknet-dir TrackNetV3 \
+    --tracknet-python /path/to/bst-venv/bin/python --workers 1 --batch-size 8
+
+# Dry run (processes clips but writes no files — test that the pipeline works)
+python -m pipeline.shuttle_extractor --tracknet-dir TrackNetV3 \
+    --tracknet-python /path/to/bst-venv/bin/python --workers 1 --batch-size 16 --dry-run
 ```
 
-`--workers N` launches N parallel batch processes, each loading its own model copy. Use `--workers 1` on V100 16GB (two copies OOM). On A100 40GB or multi-GPU nodes, `--workers 2` roughly halves wall time. `--batch-size` controls the TrackNet DataLoader batch size (default 32, safe with 2 workers; use 64 with 1 worker for better GPU utilization).
+`--workers N` launches N parallel batch processes, each loading its own model copy. Use `--workers 1` on V100 16GB (two copies OOM). On A100 40GB or multi-GPU nodes, `--workers 2` roughly halves wall time. `--batch-size` controls the TrackNet DataLoader batch size (default 32). FP32 inference on V100 16GB fits batch_size 16 comfortably; a small number of clips may OOM at 16, so re-run with batch_size 8 to pick up the stragglers (the resume logic skips clips that already have CSVs).
 
 If omitted, `--tracknet-python` defaults to the current interpreter (`sys.executable`).
 
@@ -147,7 +155,7 @@ python -m pipeline.build_dataset [OPTIONS]
 --tracknet-dir PATH    Path to TrackNetV3 directory (required unless --skip-shuttle)
 --tracknet-python PATH Python executable in BST venv (default: sys.executable)
 --workers N            Parallel workers (default 2, safe for shared GPU nodes)
---batch-size N         Batch size for TrackNet DataLoader (default 32, use 64 with --workers 1)
+--batch-size N         Batch size for TrackNet DataLoader (default 32; use 16 on V100 16GB)
 --skip-download        Skip YouTube download (videos must already exist)
 --skip-resolution      Skip resolution CSV rebuild (keep existing CSV)
 --skip-clips           Skip clip generation and class merge (steps 3-4)
@@ -157,6 +165,23 @@ python -m pipeline.build_dataset [OPTIONS]
 --taxonomy NAME        Stroke type taxonomy: 'une_merge_v1' (default), 'merged_25', or 'raw_35'
 --dry-run              Preview what the pipeline would do without executing
 --force                Continue past verification failures
+```
+
+```
+python -m pipeline.shuttle_extractor [OPTIONS]
+
+--tracknet-dir PATH    Path to TrackNetV3 directory (required)
+--clips-dir PATH       Directory containing generated clips
+--csv-dir PATH         Directory for TrackNetV3 CSV outputs
+--npy-dir PATH         Output directory for normalized .npy files
+--resolution-csv PATH  Path to video resolution CSV
+--model-path PATH      Path to TrackNet weights
+--inpaintnet-path PATH Path to InpaintNet weights
+--workers N            Parallel batch workers (default 2)
+--batch-size N         Batch size for TrackNet DataLoader (default 32)
+--tracknet-python PATH Python executable in BST venv
+--skip-extraction      Skip TrackNetV3 extraction, only convert existing CSVs to NPY
+--dry-run              Run inference without writing output files (test pipeline)
 ```
 
 ### Resuming after a crash

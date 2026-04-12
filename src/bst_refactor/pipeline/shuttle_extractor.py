@@ -131,6 +131,7 @@ def extract_all_shuttles(
     tracknet_python: Path | None = None,
     max_workers: int = 2,
     batch_size: int = 32,
+    dry_run: bool = False,
 ) -> None:
     """Run TrackNetV3 on all clips using batch mode.
 
@@ -176,9 +177,12 @@ def extract_all_shuttles(
     output_csv_dir.mkdir(parents=True, exist_ok=True)
 
     all_clips = sorted(clips_dir.rglob('*.mp4'))
-    # Filter to clips that don't already have results
-    pending = [c for c in all_clips
-               if not (output_csv_dir / (c.stem + '_ball.csv')).exists()]
+    # Filter to clips that don't already have results (dry_run processes all)
+    if dry_run:
+        pending = all_clips
+    else:
+        pending = [c for c in all_clips
+                   if not (output_csv_dir / (c.stem + '_ball.csv')).exists()]
 
     print(f'TrackNetV3 extraction: {len(pending)} pending of {len(all_clips)} total clips')
     if not pending:
@@ -209,12 +213,13 @@ def extract_all_shuttles(
         ]
         if resolved_inpaint:
             process_args.extend(['--inpaintnet_file', str(resolved_inpaint)])
+        if dry_run:
+            process_args.append('--dry_run')
 
-        # stdout goes directly to terminal (avoids pipe-buffer deadlock
-        # when multiple workers produce lots of output concurrently).
-        # stderr is piped so we can report errors.
-        proc = subprocess.Popen(process_args, text=True,
-                                stderr=subprocess.PIPE)
+        # stdout and stderr both go to terminal. Piping stderr risks
+        # deadlock if a worker produces >64KB of error output (pipe
+        # buffer fills, worker blocks, parent blocks on wait).
+        proc = subprocess.Popen(process_args, text=True)
         processes.append(proc)
 
     print(f'Launched {len(processes)} batch worker(s)')
@@ -225,9 +230,6 @@ def extract_all_shuttles(
             proc.wait()
             if proc.returncode != 0:
                 print(f'WARNING: worker exited with code {proc.returncode}')
-                stderr = proc.stderr.read()
-                if stderr:
-                    print(stderr[:500])
     finally:
         for f in list_files:
             f.unlink(missing_ok=True)
@@ -339,6 +341,8 @@ def main():
                         help='Python executable in BST venv (shared with TrackNetV3)')
     parser.add_argument('--skip-extraction', action='store_true',
                         help='Skip TrackNetV3 extraction, only convert existing CSVs to NPY')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Run inference without writing output files (test that pipeline works)')
     args = parser.parse_args()
 
     if not args.skip_extraction:
@@ -352,15 +356,17 @@ def main():
             tracknet_python=args.tracknet_python,
             max_workers=args.workers,
             batch_size=args.batch_size,
+            dry_run=args.dry_run,
         )
 
-    print('\n=== Converting shuttle CSVs to NPY ===')
-    shuttle_csvs_to_npy(
-        clips_dir=args.clips_dir,
-        csv_dir=args.csv_dir,
-        npy_output_dir=args.npy_dir,
-        resolution_csv_path=args.resolution_csv,
-    )
+    if not args.dry_run:
+        print('\n=== Converting shuttle CSVs to NPY ===')
+        shuttle_csvs_to_npy(
+            clips_dir=args.clips_dir,
+            csv_dir=args.csv_dir,
+            npy_output_dir=args.npy_dir,
+            resolution_csv_path=args.resolution_csv,
+        )
 
 
 if __name__ == '__main__':
