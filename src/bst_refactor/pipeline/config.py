@@ -18,6 +18,7 @@ SET_INFO_DIR = PROJECT_ROOT / 'ShuttleSet' / 'set'
 RAW_VIDEO_DIR = PROJECT_ROOT / 'ShuttleSet' / 'raw_video'
 CLIPS_OUTPUT_DIR = PROJECT_ROOT / 'ShuttleSet' / 'clips'
 SHUTTLE_OUTPUT_DIR = PROJECT_ROOT / 'ShuttleSet' / 'shuttle_npy'
+SHUTTLE_CSV_DIR = PROJECT_ROOT / 'ShuttleSet' / 'shuttle_csv'
 FLAW_RECORDS_PATH = PROJECT_ROOT / 'ShuttleSet' / 'flaw_shot_records.csv'
 RESOLUTION_CSV_PATH = PROJECT_ROOT / 'ShuttleSet' / 'my_raw_video_resolution.csv'
 
