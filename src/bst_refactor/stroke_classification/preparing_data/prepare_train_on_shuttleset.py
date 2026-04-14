@@ -12,10 +12,12 @@ Run from stroke_classification/:
 from mmpose.apis import MMPoseInferencer
 
 import argparse
+import gc
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
+import torch
 
 import subprocess
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
@@ -554,13 +556,20 @@ def prepare_2d_dataset_npy_from_raw_video(
             )
             # shuttle_result: (F, 2)
 
-            # Set the content of the frame failed in players detection to 0.
-            # Guard against frame count mismatch: MMPose and TrackNetV3 use
-            # different video backends that can disagree by 1-2 frames.
+            # Align temporal dimensions: MMPose and TrackNetV3 use different
+            # video backends that can disagree by 1-2 frames on the same .mp4.
+            # The mismatch is always at the tail (both decoders start at frame 0),
+            # so tail-truncating to the shorter length preserves frame alignment.
+            min_t = min(len(failed_ls), len(shuttle_result))
+            if min_t < len(failed_ls) or min_t < len(shuttle_result):
+                players_positions = players_positions[:min_t]
+                joints = joints[:min_t]
+                shuttle_result = shuttle_result[:min_t]
+                failed_ls = failed_ls[:min_t]
+
+            # Zero out shuttle coordinates for frames where pose detection failed.
             if np.any(failed_ls):
-                min_frames = min(len(failed_ls), len(shuttle_result))
-                failed_mask = np.array(failed_ls[:min_frames])
-                shuttle_result[:min_frames][failed_mask, :] = 0
+                shuttle_result[failed_ls, :] = 0
 
             np.save(save_branch+'_pos.npy', players_positions)
             # (F, P, xy)
@@ -568,6 +577,11 @@ def prepare_2d_dataset_npy_from_raw_video(
             # (F, P, J, xy)
             np.save(save_branch+'_shuttle.npy', shuttle_result)
             # (F, xy)
+
+        # Free GPU memory between clips to prevent fragmentation over ~33k clips.
+        gc.collect()
+        torch.cuda.empty_cache()
+
         pbar.update()
     pbar.close()
 
@@ -625,13 +639,20 @@ def prepare_3d_dataset_npy_from_raw_video(
             )
             # shuttle_result: (F, 2)
 
-            # Set the content of the frame failed in players detection to 0.
-            # Guard against frame count mismatch: MMPose and TrackNetV3 use
-            # different video backends that can disagree by 1-2 frames.
+            # Align temporal dimensions: MMPose and TrackNetV3 use different
+            # video backends that can disagree by 1-2 frames on the same .mp4.
+            # The mismatch is always at the tail (both decoders start at frame 0),
+            # so tail-truncating to the shorter length preserves frame alignment.
+            min_t = min(len(failed_ls), len(shuttle_result))
+            if min_t < len(failed_ls) or min_t < len(shuttle_result):
+                players_positions = players_positions[:min_t]
+                joints = joints[:min_t]
+                shuttle_result = shuttle_result[:min_t]
+                failed_ls = failed_ls[:min_t]
+
+            # Zero out shuttle coordinates for frames where pose detection failed.
             if np.any(failed_ls):
-                min_frames = min(len(failed_ls), len(shuttle_result))
-                failed_mask = np.array(failed_ls[:min_frames])
-                shuttle_result[:min_frames][failed_mask, :] = 0
+                shuttle_result[failed_ls, :] = 0
 
             np.save(save_branch+'_pos.npy', players_positions)
             # (F, P, xy)
@@ -639,6 +660,11 @@ def prepare_3d_dataset_npy_from_raw_video(
             # (F, P, J, xyz)
             np.save(save_branch+'_shuttle.npy', shuttle_result)
             # (F, xy)
+
+        # Free GPU memory between clips to prevent fragmentation over ~33k clips.
+        gc.collect()
+        torch.cuda.empty_cache()
+
         pbar.update()
     pbar.close()
 
