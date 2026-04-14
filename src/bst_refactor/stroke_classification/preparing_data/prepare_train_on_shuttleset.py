@@ -902,9 +902,9 @@ def main():
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=30,
+        default=100,
         choices=[30, 100],
-        help="Target sequence length in frames (default: 30)",
+        help="Target sequence length in frames (default: 100)",
     )
     parser.add_argument(
         "--taxonomy",
@@ -952,6 +952,7 @@ def main():
     preparing_root = (
         Path(__file__).resolve().parent / f"ShuttleSet_data_{taxonomy.name}"
     )
+    preparing_root.mkdir(parents=True, exist_ok=True)
 
     if args.seq_len == 30:
         npy_raw_dir = preparing_root / f"dataset{str_3d}_npy"

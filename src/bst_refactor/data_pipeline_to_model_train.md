@@ -58,15 +58,17 @@ python -m pipeline.build_dataset \
 source venv-mmpose/bin/activate
 cd stroke_classification
 
+# On engelbart, symlink the taxonomy output dir to scratch first (see Stage 2 Setup below)
+
 python -m preparing_data.prepare_train_on_shuttleset \
-    --skip-trajectory --skip-collate                       # pose only
+    --skip-trajectory --skip-collate                       # pose only (no shuttle CSV needed)
 
 # ── Stage 3: Collation + training (BST venv) ────────────────────────
 source venv-bst/bin/activate
 cd stroke_classification
 
 python -m preparing_data.prepare_train_on_shuttleset \
-    --skip-trajectory --skip-pose                          # collate only
+    --skip-trajectory --skip-pose                          # collate (reads shuttle CSVs)
 
 cd main_on_shuttleset
 python bst_train.py                                        # train (5 serial trials)
@@ -134,6 +136,21 @@ The pipeline produces **video clips** and **shuttle .npy files**. BST does not o
 |--------|------|--------------------------|
 | `prepare_train_on_shuttleset.py` | Runs MMPose on each clip to extract 2D (or 3D) player keypoints, combines them with shuttle trajectories at collation time, normalizes everything, and collates per-sample arrays into batch-ready `.npy` files. | **Step 1**: `prepare_trajectory()` -- run TrackNetV3 on clips, saving CSVs to `ShuttleSet/shuttle_csv/` (if shuttle extraction wasn't done in the pipeline stage). **Step 2**: `prepare_2d_dataset_npy_from_raw_video()` -- run MMPose pose estimation, extract court positions via homography, normalize joints by bounding box, save per-clip `_joints.npy`, `_pos.npy`, `_failed.npy`. Shuttle data is intentionally not read here -- keeping this step independent of CSV availability prevents a missing CSV from silently blocking the expensive GPU job. **Step 3**: `collate_npy(taxonomy=..., shuttle_csv_dir=..., resolution_df=...)` -- reads shuttle CSVs from the canonical `ShuttleSet/shuttle_csv/` dir, applies temporal alignment and failed-frame masking, pads all samples to uniform `seq_len`, computes bone vectors and interpolated joints, stacks into single arrays per split. The `taxonomy` parameter (a `Taxonomy` instance from `pipeline.config`) determines the class list for label assignment. MMPose resizes input frames internally (typically 256x192 for RTMPose COCO-17), so video resolution does not affect pose estimation quality beyond ~720p. |
 
+#### Setup
+
+On engelbart, the taxonomy output directory lives on scratch. The script auto-creates it locally via `mkdir(parents=True)`, but if you want the data on scratch you need a symlink:
+
+```bash
+# On engelbart (replace taxonomy name as needed):
+mkdir -p /scratch/comp320a/ShuttleSet_data_une_merge_v1
+cd ~/badminton_stroke_classifier/src/bst_refactor/stroke_classification/preparing_data
+ln -s /scratch/comp320a/ShuttleSet_data_une_merge_v1 ShuttleSet_data_une_merge_v1
+```
+
+If running locally or without scratch, no setup is needed -- the script creates `ShuttleSet_data_{taxonomy}/` and all subdirectories automatically.
+
+**Taxonomy independence of pose data:** Pose data is physically taxonomy-independent. Clip filenames (`{vid}_{set}_{rally}_{ball}`) are physical identifiers -- the same clip produces byte-identical keypoints regardless of which taxonomy folder it sits in. In principle, pose results from one taxonomy can be reused by another via filename matching (the folder structure differs but the data is identical). A future refactor could flatten pose output entirely and defer taxonomy-aware organization to collation.
+
 #### CLI usage
 
 Run from `stroke_classification/`:
@@ -142,10 +159,18 @@ Run from `stroke_classification/`:
 # Preview what would be done:
 python -m preparing_data.prepare_train_on_shuttleset --dry-run
 
-# Run only collation with the default taxonomy (une_merge_v1):
+# Common case: shuttle CSVs already exist from the pipeline.
+# Run pose only (no shuttle CSV dependency -- can run without them present):
+python -m preparing_data.prepare_train_on_shuttleset --skip-trajectory --skip-collate
+
+# Then collate (reads shuttle CSVs from ShuttleSet/shuttle_csv/):
 python -m preparing_data.prepare_train_on_shuttleset --skip-trajectory --skip-pose
 
-# Full run with TrackNetV3:
+# Point to a non-default shuttle CSV location:
+python -m preparing_data.prepare_train_on_shuttleset --skip-trajectory --skip-pose \
+    --shuttle-csv-dir /scratch/comp320a/ShuttleSet/shuttle_csv
+
+# Full run including TrackNetV3 shuttle extraction:
 python -m preparing_data.prepare_train_on_shuttleset --tracknet-dir /path/to/TrackNetV3
 ```
 
@@ -157,7 +182,7 @@ Key flags: `--seq-len` (30 or 100), `--taxonomy` (`une_merge_v1`, `merged_25`, o
 
 2. **Joint normalization** (`normalize_joints`): Keypoints are normalized relative to the player's bounding box diagonal. Optionally center-aligned.
 
-3. **Shuttle normalization** (`normalize_shuttlecock`): Shuttle xy divided by video resolution to get [0,1] range. Done at collation time (Step 3). Frames where pose detection failed (recorded in `_failed.npy` by Step 2) are zeroed out.
+3. **Shuttle normalization** (`normalize_shuttlecock`): Shuttle xy divided by video resolution to get [0,1] range. Done at collation time (Step 3). Frames where pose detection failed (recorded in `_failed.npy` by Step 2) have their shuttle coordinates zeroed out. This zeroing is baked into the saved collated `shuttle.npy` -- the model receives pre-zeroed data, not a separate mask. The per-clip `_failed.npy` files preserve the raw boolean mask for debugging or future use, but the source `shuttle_csv/` files are never modified.
 
 4. **Padding and augmentation** (`pad_and_augment_one_npy_video`): Each sample is padded (or strided) to a fixed `seq_len` (30 or 100 frames). Four pose representations are pre-computed:
    - `J_only`: raw joints `(t, 2, 17, 2)`
