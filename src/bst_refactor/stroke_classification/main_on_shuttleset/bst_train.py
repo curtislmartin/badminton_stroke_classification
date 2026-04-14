@@ -53,10 +53,10 @@ hyp = Hyp(
     lr=5e-4,                  # initial learning rate (cosine-annealed during training)
     warm_up_step=400,         # LR warmup steps before cosine decay begins
     taxonomy=DEFAULT_TAXONOMY, # key in TAXONOMIES: 'une_merge_v1', 'merged_25', 'raw_35', …
-    seq_len=30,               # frames per sample (must match data preprocessing)
+    seq_len=100,              # frames per sample (must match data preprocessing)
     pose_style='JnB_bone',   # 'J_only'=joints, 'JnB_bone'=joints+bones, 'Jn2B'=joints+2xbones
     use_3d_pose=False,        # True for xyz keypoints, False for xy only
-    train_partial=0.25        # fraction of training set to use (1.0 = all)
+    train_partial=1.0         # fraction of training set to use (1.0 = all)
 )
 
 

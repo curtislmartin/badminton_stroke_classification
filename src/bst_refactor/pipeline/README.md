@@ -55,7 +55,7 @@ python -m pipeline.clip_generator --clip-window between_2_hits_with_max_limits
 Three clip window options:
 - `middle_in_a_sec` -- fixed 1-second window centered on the shot frame
 - `between_2_hits` -- from previous shot's frame to next shot's frame
-- `between_2_hits_with_max_limits` -- same as above, clamped to 1.5 sec each side (default)
+- `between_2_hits_with_max_limits` -- same as above, max 1.5s before / 1.75s after shot frame (default). See `data_pipeline_to_model_train.md` Key Concepts for the full windowing table.
 
 Output: `ShuttleSet/clips/{train,val,test}/{Player}_{stroke_type}/{vid}_{set}_{rally}_{ball_round}.mp4`
 
