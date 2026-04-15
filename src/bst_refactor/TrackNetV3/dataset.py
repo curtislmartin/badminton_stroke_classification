@@ -7,7 +7,7 @@ import pandas as pd
 from PIL import Image
 from tqdm import tqdm
 from torch.utils.data import Dataset, IterableDataset
-from utils.general import get_rally_dirs, get_match_median, HEIGHT, WIDTH, SIGMA, IMG_FORMAT
+from utils.general import get_rally_dirs, get_match_median, HEIGHT, WIDTH, SIGMA, IMG_FORMAT  # noqa: F401
 
 data_dir = 'data'
 

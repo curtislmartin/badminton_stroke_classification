@@ -1,4 +1,5 @@
 import os
+import logging
 import argparse
 import numpy as np
 from tqdm import tqdm
@@ -9,6 +10,14 @@ from torch.utils.data import DataLoader
 from inference_utils import predict_location, get_ensemble_weight, generate_inpaint_mask
 from dataset import Shuttlecock_Trajectory_Dataset, Video_IterableDataset
 from utils.general import *
+
+# NOTE: This file uses a star import from utils.general (upstream TrackNetV3 code).
+# Lint rules F403/F405 are suppressed via ruff config — this code has not been
+# refactored to avoid breaking fragile upstream ML code. See issue #54.
+logging.getLogger(__name__).warning(
+    "TrackNetV3/predict.py uses a star import from utils.general (upstream code). "
+    "Lint is suppressed for this file. See issue #54 for the tracked fix."
+)
 
 
 def predict(indices, y_pred=None, c_pred=None, img_scaler=(1, 1)):

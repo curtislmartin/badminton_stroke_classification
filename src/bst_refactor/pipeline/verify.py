@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pipeline.config import (
     CLIPS_OUTPUT_DIR, SHUTTLE_OUTPUT_DIR, EXCLUDED_VIDEOS, REMOVED_SHOTS,
-    MERGE_MAP, PLAYERS, SPLITS,
+    MERGE_MAP, PLAYERS, SPLITS,  # noqa: F401
     UNPREFIXED_TYPES, TAXONOMY_UNE_MERGE_V1, Taxonomy,
 )
 

@@ -5,9 +5,9 @@
 # Modified by Jing-Yuan Chang
 
 import torch
+from torchinfo import summary  # noqa: F401
 from torch import nn, Tensor
 from positional_encodings.torch_encodings import PositionalEncoding1D
-from torchinfo import summary
 from torch.utils.flop_counter import FlopCounterMode
 
 

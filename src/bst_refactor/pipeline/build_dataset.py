@@ -22,7 +22,7 @@ from pathlib import Path
 
 from pipeline.config import (
     RAW_VIDEO_DIR, CLIPS_OUTPUT_DIR, RESOLUTION_CSV_PATH,
-    SPLITS, EXCLUDED_VIDEOS, REMOVED_SHOTS, MERGE_MAP, CLIP_WINDOW,
+    SPLITS, EXCLUDED_VIDEOS, REMOVED_SHOTS, MERGE_MAP, CLIP_WINDOW,  # noqa: F401
     TAXONOMIES, TAXONOMY_UNE_MERGE_V1, DEFAULT_TAXONOMY, Taxonomy,
 )
 from pipeline.download_videos import download_all_videos, build_resolution_csv
