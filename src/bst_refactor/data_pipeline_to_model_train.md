@@ -255,7 +255,7 @@ Bridges collated `.npy` files to PyTorch `DataLoader`s. Imports `Taxonomy` from 
 
 | Name | Role |
 |------|------|
-| `Dataset_npy_collated` | Primary Dataset class for BST. Loads pre-collated arrays from disk. Supports `train_partial` to use a fraction of training data. Returns `(human_pose, pos, shuttle), video_len, label` per sample. |
+| `Dataset_npy_collated` | Primary Dataset class for BST. Loads pre-collated arrays from disk. Supports `train_partial` to use a fraction of training data. Returns `(human_pose, pos, shuttle), video_len, label` per sample. **Filters out zero-length clips at load time** (see known divergence below). |
 | `Dataset_npy_collated_one_side` | Single-side variant: filters to Top or Bottom labels only (halves the dataset). **Requires `unknown_first=True`** — asserts at init. Uses the position of `'unknown'` in `class_list()` to find the Top/Bottom label boundary. |
 | `Dataset_npy_collated_single_pose` | Extracts only the acting player's pose per sample (Top or Bottom). **Requires `unknown_first=True`** — same label-boundary assumption as `Dataset_npy_collated_one_side`. |
 | `Dataset_npy` | Alternative that loads per-clip `.npy` files on-the-fly (slower, but doesn't require pre-collation). Accepts a `taxonomy` parameter for label indexing. Applies `RandomTranslation` during training. |
@@ -265,6 +265,18 @@ Bridges collated `.npy` files to PyTorch `DataLoader`s. Imports `Taxonomy` from 
 | `POSE_BONE_MULTIPLIER` | Dict mapping pose style names to bone-set multipliers: `{'J_only': 0, 'JnB_bone': 1, 'JnB_interp': 1, 'Jn2B': 2}`. Used by train/infer scripts to compute `in_dim`. |
 | `pad_class_labels()` | Pads class label strings to uniform width for aligned F1 display. |
 | `RandomTranslation` / `RandomTranslation_batch` | Data augmentation: small random xy shifts applied to joint coordinates during training. |
+
+#### Known divergence: zero-length clip filtering
+
+`Dataset_npy_collated` drops clips with `videos_len == 0` at load time. This is a **divergence from the original BST code**, which has no such filter.
+
+**Background:** Our automated pipeline processes all clips from ShuttleSet, including degenerate ones where MMPose fails to detect 2 players on every single frame. These clips end up with `videos_len=0` after collation — the entire sample is zero-padded with no real frames. When the transformer builds its padding mask, all positions are masked out, causing `softmax(all -inf) = NaN`, which poisons the loss and the entire training run.
+
+The original BST author hand-curated his clip set (manually running `gen_my_dataset.py` 6 times, verifying counts against `class_total.xlsx`, and removing flawed shots by hand — see `BST-original/README.md`). He also published pre-extracted `.npy` files on Google Drive rather than re-running extraction. His dataset likely never contained zero-frame clips.
+
+**Affected clips (merged_25 taxonomy):** 47 train, 5 val, 13 test (65 total out of ~33k).
+
+**Investigation TODO:** Download the original BST `dataset_npy` files from the Google Drive links in `BST-original/README.md` and check whether they contain any `videos_len == 0` entries. If they do, this is a latent bug in the original; if not, the difference is in clip generation (our automated extraction vs his manual process).
 
 #### Tensor shapes at model input
 

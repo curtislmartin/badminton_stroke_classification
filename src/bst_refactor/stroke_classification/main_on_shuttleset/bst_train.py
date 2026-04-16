@@ -34,7 +34,7 @@ from preparing_data.shuttleset_dataset import prepare_npy_collated_loaders, \
                                               POSE_BONE_MULTIPLIER
 from model.bst import BST_0, BST_PPF, BST_CG, BST_AP, BST_CG_AP
 from result_utils import show_f1_results, plot_confusion_matrix
-from pipeline.config import TAXONOMIES, DEFAULT_TAXONOMY, Taxonomy
+from pipeline.config import TAXONOMIES, Taxonomy
 
 
 # ==========================================================================
@@ -254,7 +254,12 @@ def train_network(
         num_cycles=0.25  # fraction of cosine cycle (0.25 = quarter-cosine decay)
     )
 
-    best_value = 0.0
+    # Track top-2 of each metric (for HParams summary + verifying early-stop vs crash)
+    best_macro = second_macro = 0.0
+    best_macro_epoch = second_macro_epoch = 0
+    best_min = second_min = 0.0
+    best_min_epoch = second_min_epoch = 0
+    best_val_loss, best_val_loss_epoch = float('inf'), 0
     early_stop_count = 0
 
     for epoch in range(1, hyp.n_epochs+1):
@@ -283,20 +288,59 @@ def train_network(
 
         writer.add_scalar('Loss/Train', train_loss, epoch)
         writer.add_scalar('Loss/Val', val_loss, epoch)
+        writer.add_scalar('F1/Val_macro', f1_score_avg, epoch)
+        writer.add_scalar('F1/Val_min', f1_score_min, epoch)
 
-        # Early stopping: if macro F1 hasn't improved for early_stop_n_epochs, stop training
+        curr_macro, curr_min = f1_score_avg.item(), f1_score_min.item()
+
+        # Early stop + snapshot best weights (piggybacks on new-best detection)
         early_stop_count += 1
-        if best_value < f1_score_avg:
-            best_value = f1_score_avg
+        if curr_macro > best_macro:
+            second_macro, second_macro_epoch = best_macro, best_macro_epoch
+            best_macro, best_macro_epoch = curr_macro, epoch
             # state_dict() = snapshot of all model weights as a dict (like model.get_weights() in TF)
             # deepcopy because state_dict returns references that would change as training continues
             best_state = deepcopy(model.state_dict())
-            print(f'Picked! => Best value {f1_score_avg:.3f}')
+            print(f'Picked! => Best value {curr_macro:.3f}')
             early_stop_count = 0
+        elif curr_macro > second_macro:
+            second_macro, second_macro_epoch = curr_macro, epoch
+
+        if curr_min > best_min:
+            second_min, second_min_epoch = best_min, best_min_epoch
+            best_min, best_min_epoch = curr_min, epoch
+        elif curr_min > second_min:
+            second_min, second_min_epoch = curr_min, epoch
+
+        best_val_loss, best_val_loss_epoch = min(
+            (best_val_loss, best_val_loss_epoch), (val_loss, epoch)
+        )
 
         if early_stop_count == hyp.early_stop_n_epochs:
-            print(f'Early stop with best value {best_value:.3f}')
+            print(f'Early stop with best value {best_macro:.3f}')
             break
+
+    # HParams summary: one row per run, sortable in TB's HParams tab.
+    # stopped_epoch - best_macro_epoch == early_stop_n_epochs confirms clean early-stop.
+    writer.add_hparams(
+        hparam_dict=hyp._asdict(),
+        metric_dict={
+            'best/macro_f1':        best_macro,
+            'best/macro_f1_epoch':  best_macro_epoch,
+            'best/macro_f1_2nd':    second_macro,
+            'best/macro_f1_2nd_ep': second_macro_epoch,
+            'best/min_f1':          best_min,
+            'best/min_f1_epoch':    best_min_epoch,
+            'best/min_f1_2nd':      second_min,
+            'best/min_f1_2nd_ep':   second_min_epoch,
+            'best/val_loss':        best_val_loss,
+            'best/val_loss_epoch':  best_val_loss_epoch,
+            'stopped_epoch':        epoch,
+        },
+        run_name='.',
+        global_step=epoch,
+    )
+    writer.close()
 
     # Save best checkpoint and restore it into the model
     torch.save(best_state, str(save_path))  # like model.save_weights() in TF

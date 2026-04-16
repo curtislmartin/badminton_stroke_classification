@@ -252,6 +252,36 @@ class Dataset_npy_collated(Dataset):
         self.videos_len = np.load(str(branch/'videos_len.npy'))
         self.labels: np.ndarray = np.load(str(branch/'labels.npy'))
 
+        # ---------------------------------------------------------------
+        # DIVERGENCE FROM ORIGINAL BST: Drop zero-length clips.
+        #
+        # Clips where MMPose failed on EVERY frame end up with
+        # videos_len=0 after collation. The transformer's padding mask
+        # becomes all-False, causing softmax(all -inf) = NaN, which
+        # poisons the entire training run from the first epoch.
+        #
+        # The original BST author hand-curated his clip set and published
+        # pre-extracted .npy files (see BST-original README), so he
+        # likely never encountered zero-frame clips. Our automated
+        # pipeline processes all clips including degenerate ones.
+        #
+        # TODO: Investigate whether the original BST dataset_npy files
+        # (Google Drive links in BST-original/README.md) contain any
+        # zero-length clips. If they do, this is a latent bug in the
+        # original; if not, our clip extraction or pose detection is
+        # producing clips that his pipeline never generated.
+        # ---------------------------------------------------------------
+        valid = self.videos_len > 0
+        n_dropped = int(np.sum(~valid))
+        if n_dropped > 0:
+            print(f'  [{set_name}] Dropping {n_dropped} zero-length clips '
+                  f'(of {len(valid)} total)')
+            self.human_pose = self.human_pose[valid]
+            self.pos = self.pos[valid]
+            self.shuttle = self.shuttle[valid]
+            self.videos_len = self.videos_len[valid]
+            self.labels = self.labels[valid]
+
         if set_name == 'train' and train_partial < 1:
             self.adjust_to_partial_train_set(train_partial)
 
