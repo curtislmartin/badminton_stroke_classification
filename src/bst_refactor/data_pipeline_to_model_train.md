@@ -210,6 +210,43 @@ For example, `ShuttleSet_data_une_merge_v1/`, `ShuttleSet_data_merged_25/`, or `
 
 ---
 
+### Between Stages 2 and 3 -- Data Quality Validation (`validation_scripts/`)
+
+Before training, run the validation scripts to assess detection quality. Two independent failure modes are invisible at training time and worth quantifying:
+
+1. **MMPose failures** (`_failed.npy`): frames where MMPose couldn't detect exactly 2 players. Joints, court positions, and shuttle coordinates are all zeroed on these frames at collation. The BST transformer does **not** mask them -- they participate in attention as zero vectors.
+
+2. **Shuttle detection failures** (shuttle NPY visibility column): frames where TrackNetV3 reported visibility=0. The visibility column is dropped during collation, so these failures become silent (0, 0) shuttle coordinates with no way for the model to distinguish them from a shuttle at the origin.
+
+#### Usage
+
+Run from `src/bst_refactor/` (MMPose or BST venv -- only needs numpy, matplotlib, pandas):
+
+```bash
+# Minimal (MMPose failure stats only):
+python validation_scripts/validate_zeroed_frames.py \
+    --data-root /scratch/comp320a/ShuttleSet_data_merged_25
+
+# Full (adds flaw cross-reference, hit-frame proximity, shuttle analysis):
+python validation_scripts/validate_zeroed_frames.py \
+    --data-root /scratch/comp320a/ShuttleSet_data_merged_25 \
+    --set-dir ShuttleSet/set \
+    --shuttle-npy-dir ShuttleSet/shuttle_npy
+```
+
+Optional flags: `--threshold` (flagged-clip cutoff, default 0.5), `--hit-window` (frames either side of hit, default 10), `--taxonomy` (for output filenames, default `merged_25`).
+
+#### Output
+
+All saved to `validation_scripts/zeroed_frames_analysis_outputs/`:
+
+- **Text report** (`analysis_{taxonomy}_{date}_{time}.txt`): overall/per-split/per-stroke failure rates, tiered clip counts, flaw cross-reference, shuttle detection stats with MMPose x shuttle 2x2 overlap, hit-frame proximity breakdown for both MMPose and shuttle.
+- **Figures**: fail rate histogram (log y-axis), temporal pattern by clip position, hit-frame profile (MMPose vs shuttle overlay).
+
+See `validation_scripts/README.md` for full argument and report section documentation.
+
+---
+
 ### Stage 3 -- Dataset Loading (`stroke_classification/preparing_data/shuttleset_dataset.py`)
 
 Bridges collated `.npy` files to PyTorch `DataLoader`s. Imports `Taxonomy` from `pipeline.config` for class list construction.
@@ -312,6 +349,11 @@ Task()
 
 The `__main__` block runs 5 serial trials (serial_no 1-5) to measure variance.
 
+#### Outputs
+
+- **Model weights** (`main_on_shuttleset/weight/*.pt`): Best-validation-F1 checkpoint per trial. Git-ignored — these are reproducible and too large to track.
+- **TensorBoard logs** (`main_on_shuttleset/runs/`): Loss and F1 curves. Tracked in git so the team can review training results.
+
 ---
 
 ### Stage 6 -- Inference (`stroke_classification/main_on_shuttleset/bst_infer.py`)
@@ -355,6 +397,10 @@ preparing_data/prepare_train_on_shuttleset.py  (--taxonomy flag)
     |
     v  (produces preparing_data/ShuttleSet_data_{taxonomy.name}/dataset_npy_collated/)
     |
+validation_scripts/validate_zeroed_frames.py  # Data quality check (optional, pre-training)
+  -> validation_scripts/hit_frame_lookup.py   # Hit-frame index derivation from set CSVs
+    |
+    v
 preparing_data/shuttleset_dataset.py  # PyTorch Dataset + DataLoader wrappers
   -> pipeline.config                  # Imports Taxonomy, TAXONOMIES
     |
