@@ -240,6 +240,55 @@ def summarise(
         print(f'       {mmpose_total} mmpose npy sets')
 
 
+def _menu(prompt: str, options: list[str]) -> str:
+    """Print a numbered menu and return the chosen option.
+
+    :param prompt: Question to display above the options.
+    :param options: List of option strings.
+    :return: The selected option string.
+    """
+    print(f'\n{prompt}')
+    for i, opt in enumerate(options, 1):
+        print(f'  {i}) {opt}')
+    while True:
+        raw = input('> ').strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        print(f'  Enter a number between 1 and {len(options)}.')
+
+
+def interactive(paths: DataPaths) -> None:
+    """Step-through TUI: pick split, class, and output type interactively.
+
+    :param paths: Root directories for each data type.
+    """
+    # Step 1: split
+    split_choice = _menu('Select split:', ['all'] + list(SPLITS))
+    split = None if split_choice == 'all' else split_choice
+
+    # Step 2: class — discover from disk so the list reflects what's actually there
+    seen: set[str] = set()
+    for sp in ([split] if split else list(SPLITS)):
+        for d in _class_dirs(paths.clips_dir / sp):
+            seen.add(d.name)
+    class_options = ['all'] + sorted(seen)
+    class_choice = _menu('Select class:', class_options)
+    taxonomy_class = None if class_choice == 'all' else class_choice
+
+    # Step 3: output
+    output_choice = _menu('Show:', ['summary table', 'file paths'])
+
+    print()
+    if output_choice == 'summary table':
+        summarise(paths, split=split, taxonomy_class=taxonomy_class)
+    else:
+        records = get_clip_records(paths, split=split, taxonomy_class=taxonomy_class)
+        for r in records:
+            shuttle_str = str(r.shuttle_npy) if r.shuttle_npy else 'MISSING'
+            mmpose_str = str(r.mmpose_joints) if r.mmpose_joints else 'NO_MMPOSE'
+            print(f'{r.split}\t{r.taxonomy_class}\t{r.clip}\t{shuttle_str}\t{mmpose_str}')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -286,7 +335,11 @@ if __name__ == '__main__':
         mmpose_npy_dir=args.mmpose_npy_dir,
     )
 
-    if args.list_classes:
+    # No flags passed — launch interactive TUI
+    no_flags = not any([args.split, args.taxonomy_class, args.summary, args.list_classes])
+    if no_flags:
+        interactive(paths)
+    elif args.list_classes:
         target_splits = [args.split] if args.split else list(SPLITS)
         seen: set[str] = set()
         for sp in target_splits:

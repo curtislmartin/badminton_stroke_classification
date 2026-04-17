@@ -265,3 +265,46 @@ def test_summarise_hides_mmpose_column_when_dir_not_set(capsys):
         summarise(paths)
     captured = capsys.readouterr()
     assert 'mmpose=' not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# _menu and interactive
+# ---------------------------------------------------------------------------
+
+from pipeline.data_access import _menu, interactive  # noqa: E402
+
+
+def test_menu_returns_selected_option(monkeypatch):
+    monkeypatch.setattr('builtins.input', lambda _: '2')
+    result = _menu('Pick one:', ['alpha', 'beta', 'gamma'])
+    assert result == 'beta'
+
+
+def test_menu_rejects_out_of_range_then_accepts(monkeypatch, capsys):
+    responses = iter(['0', '99', '1'])
+    monkeypatch.setattr('builtins.input', lambda _: next(responses))
+    result = _menu('Pick one:', ['only'])
+    assert result == 'only'
+    assert 'Enter a number' in capsys.readouterr().out
+
+
+def test_interactive_summary(monkeypatch, capsys):
+    # Choices: split=all(1), class=all(1), output=summary table(1)
+    responses = iter(['1', '1', '1'])
+    monkeypatch.setattr('builtins.input', lambda _: next(responses))
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = _make_fake_dataset(Path(tmp), SIMPLE_STRUCTURE)
+        interactive(paths)
+    assert 'clips=' in capsys.readouterr().out
+
+
+def test_interactive_file_paths(monkeypatch, capsys):
+    # Choices: split=train(2), class=all(1), output=file paths(2)
+    responses = iter(['2', '1', '2'])
+    monkeypatch.setattr('builtins.input', lambda _: next(responses))
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = _make_fake_dataset(Path(tmp), SIMPLE_STRUCTURE)
+        interactive(paths)
+    out = capsys.readouterr().out
+    assert 'train' in out
+    assert '.mp4' in out
