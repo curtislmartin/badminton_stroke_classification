@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pipeline.data_access import (
     DataPaths,
+    ClipRecord,
     get_clip_records,
     summarise,
     _class_dirs,
@@ -109,6 +110,7 @@ def test_no_filter_returns_all_clips():
         records = get_clip_records(paths)
     # 2 + 1 + 1 + 1 + 1 + 1 = 7 clips total
     assert len(records) == 7
+    assert all(isinstance(r, ClipRecord) for r in records)
 
 
 def test_split_filter_restricts_to_split():
