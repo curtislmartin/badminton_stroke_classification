@@ -47,12 +47,43 @@ Hyp = namedtuple('Hyp', [
     'taxonomy', 'seq_len', 'early_stop_n_epochs',
     'pose_style', 'use_3d_pose', 'train_partial'
 ])
+# --------------------------------------------------------------------------
+# LR-SCHEDULE RETUNE (2026-04-17)
+# --------------------------------------------------------------------------
+# The original BST recipe used n_epochs=1600, warm_up_step=400, patience=300,
+# with a cosine scheduler at num_cycles=0.25 (see line below). In practice
+# on ShuttleSet + merged_25, the TB log from run Apr17_13-04-35 showed:
+#     - best F1_macro 0.8311 at epoch 41
+#     - best F1_min   0.6250 at epoch 53
+#     - best Val_loss 1.0032 at epoch 27
+#     - training stopped at epoch 341 (patience fired)
+# Convergence is well before epoch 60. At n_epochs=1600, num_cycles=0.25,
+# the LR is still ~99.98% of peak at epoch 41, so cosine decay never
+# actually bites during the useful window — the model just drifts under
+# near-peak LR for hundreds of epochs and overfits.
+# Retuned values (active block below) match the schedule to observed
+# convergence: ~4-epoch warmup, 120-epoch cosine that reaches 0 at the
+# end, and patience tightened to 40 epochs to stay meaningful at the new
+# length. The old values are preserved (commented) for easy revert.
+# --------------------------------------------------------------------------
+# hyp = Hyp(
+#     n_epochs=1600,            # max epochs (will early-stop before this)
+#     early_stop_n_epochs=300,  # stop if no F1 improvement for this many epochs
+#     batch_size=128,
+#     lr=5e-4,                  # initial learning rate (cosine-annealed during training)
+#     warm_up_step=400,         # LR warmup steps before cosine decay begins
+#     taxonomy='merged_25',      # key in TAXONOMIES: 'une_merge_v1', 'merged_25', 'raw_35', …
+#     seq_len=100,              # frames per sample (must match data preprocessing)
+#     pose_style='JnB_bone',   # 'J_only'=joints, 'JnB_bone'=joints+bones, 'Jn2B'=joints+2xbones
+#     use_3d_pose=False,        # True for xyz keypoints, False for xy only
+#     train_partial=1.0         # fraction of training set to use (1.0 = all)
+# )
 hyp = Hyp(
-    n_epochs=1600,            # max epochs (will early-stop before this)
-    early_stop_n_epochs=300,  # stop if no F1 improvement for this many epochs
+    n_epochs=120,             # was 1600 — matches observed convergence (peak ~epoch 41)
+    early_stop_n_epochs=40,   # was 300 — meaningful at the new schedule length
     batch_size=128,
     lr=5e-4,                  # initial learning rate (cosine-annealed during training)
-    warm_up_step=400,         # LR warmup steps before cosine decay begins
+    warm_up_step=100,         # was 400 — ~4 epochs of warmup instead of ~17
     taxonomy='merged_25',      # key in TAXONOMIES: 'une_merge_v1', 'merged_25', 'raw_35', …
     seq_len=100,              # frames per sample (must match data preprocessing)
     pose_style='JnB_bone',   # 'J_only'=joints, 'JnB_bone'=joints+bones, 'Jn2B'=joints+2xbones
@@ -247,12 +278,23 @@ def train_network(
     # AdamW = Adam with decoupled weight decay (standard for transformers)
     # model.parameters() returns all learnable weights (TF equivalent: model.trainable_variables)
     optimizer = optim.AdamW(model.parameters(), lr=hyp.lr)
-    # Cosine schedule: LR ramps up during warmup, then decays following a cosine curve
+    # Cosine schedule: LR ramps up during warmup, then decays following a cosine curve.
+    # See the 2026-04-17 retune block above hyp for the num_cycles 0.25 -> 0.5 reasoning.
+    # HF formula: lr_factor = 0.5 * (1 + cos(pi * 2 * num_cycles * progress))
+    #   num_cycles=0.25 -> LR ends at 50% of peak (partial dropoff)
+    #   num_cycles=0.5  -> LR ends at 0 (full standard cosine descent)
+    #   num_cycles=1.0  -> LR ends back at peak (don't use — full wave)
+    # scheduler = get_cosine_schedule_with_warmup(
+    #     optimizer=optimizer,
+    #     num_warmup_steps=hyp.warm_up_step,
+    #     num_training_steps=(hyp.n_epochs * len(train_loader)),
+    #     num_cycles=0.25  # fraction of cosine cycle (0.25 = quarter-cosine decay)
+    # )
     scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=hyp.warm_up_step,
         num_training_steps=(hyp.n_epochs * len(train_loader)),  # total batches across all epochs
-        num_cycles=0.25  # fraction of cosine cycle (0.25 = quarter-cosine decay)
+        num_cycles=0.5  # was 0.25 — full cosine descent to 0 at end of schedule
     )
 
     # Track top-2 of each metric (for HParams summary + verifying early-stop vs crash)
@@ -377,11 +419,16 @@ class Tee:
 
 
 class Task:
-    def __init__(self, n_joints=17, taxonomy: Taxonomy = None) -> None:
+    def __init__(self, n_joints=17, taxonomy: Taxonomy = None,
+                 weight_dir: Path = Path('weight')) -> None:
         self.use_cuda = torch.cuda.is_available()
         self.device = 'cuda' if self.use_cuda else 'cpu'
         self.n_joints = n_joints
         self.taxonomy = taxonomy or TAXONOMIES[hyp.taxonomy]
+        # Where to save/load weights for this run. Caller should pass a
+        # per-invocation subdir (e.g. weight/run_YYYYMMDD_HHMMSS) so fresh
+        # runs never collide with older weights — see __main__ setup.
+        self.weight_dir = weight_dir
 
     def prepare_dataloaders(
         self,
@@ -443,7 +490,7 @@ class Task:
 
         self.model_name += model_postfix
 
-        weight_path = Path(f'weight/{save_name}.pt')
+        weight_path = self.weight_dir / f'{save_name}.pt'
         if weight_path.exists():
             self.net.load_state_dict(
                 torch.load(str(weight_path), map_location=self.device, weights_only=True)
@@ -561,18 +608,36 @@ if __name__ == '__main__':
         else:
             model_info = additional_model_info
 
+    # ----------------------------------------------------------------------
+    # Per-run weight folder.
+    # Every invocation mints a fresh weight/run_<timestamp>/ subfolder, so
+    # new training runs never collide with older weights via the
+    # seek_network_weights cache (the old flat weight/<name>.pt layout
+    # caused silent training-skips after hyperparam changes).
+    #
+    # To re-test an existing run without retraining, set resume_from to its
+    # folder name (e.g. 'run_20260417_091933'). The cache then finds the
+    # saved weights under weight/<resume_from>/ and skips training, just
+    # running test. Leave as None for normal fresh-train behaviour.
+    # ----------------------------------------------------------------------
+    resume_from: str | None = None
+
+    timestamp = f'{datetime.now():%Y%m%d_%H%M%S}'
+    weight_dir = Path('weight') / (resume_from or f'run_{timestamp}')
+    weight_dir.mkdir(parents=True, exist_ok=True)
+
     # Test output is auto-teed to a timestamped log file so metrics are never
     # lost to a dropped terminal. Training stdout stays on terminal only — TB
     # captures it. One log file per script invocation, all 5 serials inside.
     log_dir = Path('test_logs')
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f'test_{datetime.now():%Y%m%d_%H%M%S}.log'
+    log_path = log_dir / f'test_{timestamp}.log'
 
     with open(log_path, 'w') as log_f:
         tee = Tee(sys.stdout, log_f)
         for serial_no in range(1, 4):
             print(f'Running serial {serial_no} ...')
-            task = Task(n_joints=17, taxonomy=taxonomy)
+            task = Task(n_joints=17, taxonomy=taxonomy, weight_dir=weight_dir)
             task.prepare_dataloaders(
                 root_dir=Path(f'preparing_data/ShuttleSet_data_{taxonomy.name}')
                              /npy_collated_dir,

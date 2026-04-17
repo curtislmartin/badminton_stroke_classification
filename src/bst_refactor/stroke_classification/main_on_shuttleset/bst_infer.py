@@ -3,6 +3,13 @@
 # Suitable as a backend for Gradio GUI — call task.infer() to get predictions.
 #
 # See bst_train.py for detailed PyTorch/TF comparison comments.
+#
+# TODO (dedup): the MODELS dict, the Task scaffolding (device detect,
+# get_network_architecture, pose_style/in_dim math), and the dataloader
+# plumbing here overlap heavily with bst_train.py. When a third entry point
+# lands (Gradio, ONNX export, etc.), extract a bst_common.py with MODELS,
+# a base Task, and the shared dataloader helpers. Not worth doing with only
+# two call sites. Captured in scratch/architecture_notes/arch_1_directions.md.
 
 import torch
 from torch import Tensor, nn
