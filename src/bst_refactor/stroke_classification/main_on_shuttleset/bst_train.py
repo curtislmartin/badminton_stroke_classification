@@ -20,6 +20,7 @@ from pathlib import Path
 from copy import deepcopy
 from collections import namedtuple
 from contextlib import redirect_stdout
+import math
 import time
 from datetime import datetime, timedelta
 
@@ -36,6 +37,7 @@ from preparing_data.shuttleset_dataset import prepare_npy_collated_loaders, \
 from model.bst import BST_0, BST_PPF, BST_CG, BST_AP, BST_CG_AP
 from result_utils import show_f1_results, plot_confusion_matrix
 from pipeline.config import TAXONOMIES, Taxonomy
+from run_tracker import track_run, track_serial
 
 
 # ==========================================================================
@@ -45,7 +47,8 @@ from pipeline.config import TAXONOMIES, Taxonomy
 Hyp = namedtuple('Hyp', [
     'n_epochs', 'batch_size', 'lr', 'warm_up_step',
     'taxonomy', 'seq_len', 'early_stop_n_epochs',
-    'pose_style', 'use_3d_pose', 'train_partial'
+    'pose_style', 'use_3d_pose', 'train_partial',
+    'use_aux_schedule', 'aux_fade_end_epoch',
 ])
 # --------------------------------------------------------------------------
 # LR-SCHEDULE RETUNE (2026-04-17)
@@ -62,9 +65,11 @@ Hyp = namedtuple('Hyp', [
 # actually bites during the useful window — the model just drifts under
 # near-peak LR for hundreds of epochs and overfits.
 # Retuned values (active block below) match the schedule to observed
-# convergence: ~4-epoch warmup, 120-epoch cosine that reaches 0 at the
-# end, and patience tightened to 40 epochs to stay meaningful at the new
-# length. The old values are preserved (commented) for easy revert.
+# convergence: ~4-epoch warmup, short cosine that reaches 0 at the end,
+# and patience tightened to 40 epochs to stay meaningful at the new
+# length. n_epochs has since been shortened again (120 -> 80) to pair
+# with the AUX-SCHEDULE block; see that block for rationale. The old
+# values are preserved (commented) for easy revert.
 # --------------------------------------------------------------------------
 # hyp = Hyp(
 #     n_epochs=1600,            # max epochs (will early-stop before this)
@@ -78,9 +83,47 @@ Hyp = namedtuple('Hyp', [
 #     use_3d_pose=False,        # True for xyz keypoints, False for xy only
 #     train_partial=1.0         # fraction of training set to use (1.0 = all)
 # )
+# --------------------------------------------------------------------------
+# AUX-SCHEDULE (CG/AP warm-start-to-fade)
+# --------------------------------------------------------------------------
+# Hypothesis: Clean Gate and Aim Player are heuristics. They accelerate
+# early convergence while the LR is hot, but they also constrain the
+# representation the transformer backbone can learn. Annealing them out
+# during training should let the backbone find a richer representation.
+#
+# Implementation: a scalar aux_factor in [0, 1] scales CG's dirt subtraction
+# and blends AP's alpha multipliers toward pass-through (1.0). The schedule
+# is cosine from epoch 1 (factor=1.0) to aux_fade_end_epoch (factor=0.0),
+# then pinned at 0 for the rest of training (pure-backbone phase).
+#
+# Knobs (both below in the hyp block):
+#   use_aux_schedule  -- False pins factor at 1.0 all run, reproducing the
+#                        unscheduled BST_CG_AP baseline exactly.
+#   aux_fade_end_epoch -- epoch at which the factor first reaches 0. Set
+#                         well below n_epochs to guarantee a long pure-
+#                         backbone tail. At 15 with n_epochs=80: warm-start
+#                         is ~20% of training, then 65 epochs of pure-
+#                         backbone at cooling LR — framed as warm-start
+#                         then finetune. A prior 60/120 schedule put peaks
+#                         inside the fade window (factor still 0.6-0.74 at
+#                         pick time for 2 of 3 seeds), which diluted the
+#                         signal into noise; the only seed that picked deep
+#                         in the fade (factor ~0.1) showed the hoped-for
+#                         min-F1 lift.
+#
+# CG and AP currently share one factor (set_schedule_factors passes the
+# same value to both). If a later ablation wants independent fade timing,
+# split into cg_fade_end_epoch and ap_fade_end_epoch and pass two values
+# through aux_schedule_factor into set_schedule_factors.
+#
+# Test-time behaviour: the best checkpoint captures cg_factor and ap_factor
+# as buffers in state_dict. task.test() runs forward with those restored
+# values, so the final test metric reflects whichever factor was active at
+# the best-F1 epoch. Nothing forces them to 0 or 1 at test time.
+# --------------------------------------------------------------------------
 hyp = Hyp(
-    n_epochs=120,             # was 1600 — matches observed convergence (peak ~epoch 41)
-    early_stop_n_epochs=40,   # was 300 — meaningful at the new schedule length
+    n_epochs=80,              # compressed warm-start-then-finetune schedule
+    early_stop_n_epochs=40,   # patience ~half the run
     batch_size=128,
     lr=5e-4,                  # initial learning rate (cosine-annealed during training)
     warm_up_step=100,         # was 400 — ~4 epochs of warmup instead of ~17
@@ -88,13 +131,38 @@ hyp = Hyp(
     seq_len=100,              # frames per sample (must match data preprocessing)
     pose_style='JnB_bone',   # 'J_only'=joints, 'JnB_bone'=joints+bones, 'Jn2B'=joints+2xbones
     use_3d_pose=False,        # True for xyz keypoints, False for xy only
-    train_partial=1.0         # fraction of training set to use (1.0 = all)
+    train_partial=1.0,        # fraction of training set to use (1.0 = all)
+    use_aux_schedule=True,    # Run B: CG/AP off from start, 80-ep schedule. Null test vs 18_15 and Run A.
+    aux_fade_end_epoch=0,     # epoch at which aux_factor first reaches 0; stays 0 after (ignored when use_aux_schedule=False)
 )
 
 
 # ==========================================================================
 # Training and evaluation functions
 # ==========================================================================
+
+def aux_schedule_factor(epoch: int, fade_end_epoch: int) -> float:
+    """Cosine warm-start-to-fade schedule for CG/AP auxiliary modules.
+
+    Factor is 1.0 at epoch 1, 0.5 at mid-fade, and 0.0 at fade_end_epoch.
+    Stays pinned at 0.0 for all epochs beyond fade_end_epoch, giving the
+    transformer backbone a pure-solo phase to find its own best representation.
+
+    Decoupling fade_end from n_epochs matters when the historical peak F1
+    falls well inside the schedule: setting fade_end_epoch near (or before)
+    that peak guarantees CG/AP contribution is meaningfully reduced in the
+    peak region, so the experiment actually tests the hypothesis rather than
+    running a near-baseline with a mild perturbation.
+
+    :param epoch: current epoch, 1-indexed (matches the training loop).
+    :param fade_end_epoch: epoch at which factor first reaches 0.0; stays 0 after.
+    :return: scalar in [0, 1].
+    """
+    if fade_end_epoch <= 1 or epoch >= fade_end_epoch:
+        return 0.0 if epoch >= fade_end_epoch else 1.0
+    progress = (epoch - 1) / (fade_end_epoch - 1)
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
 
 def train_one_epoch(
     model: nn.Module,
@@ -269,8 +337,12 @@ def train_network(
     save_path: Path,
     n_bones,
     n_classes: int,
+    tb_dir: Path | None = None,
 ):
-    writer = SummaryWriter()  # logs to ./runs/ — view with: tensorboard --logdir=runs
+    # tb_dir lands the event files under experiments/<run_id>/tb/serial_N/ so
+    # TB folders pair with the run they came from. Default SummaryWriter() writes
+    # to ./runs/<host_time>/, which is what older runs used.
+    writer = SummaryWriter(log_dir=str(tb_dir)) if tb_dir is not None else SummaryWriter()
     random_shift_fn = RandomTranslation_batch()  # data augmentation: small xy shifts
 
     # label_smoothing=0.1: softens targets from [0,1] to [0.004, 0.904] to reduce overconfidence
@@ -306,6 +378,14 @@ def train_network(
     early_stop_count = 0
 
     for epoch in range(1, hyp.n_epochs+1):
+        # Auxiliary module schedule: cosine fade of CG/AP from 1.0 -> 0.0 across the run.
+        # When disabled, factor stays at 1.0 -> identical to unscheduled BST_CG_AP.
+        if hyp.use_aux_schedule:
+            aux_factor = aux_schedule_factor(epoch, hyp.aux_fade_end_epoch)
+        else:
+            aux_factor = 1.0
+        model.set_schedule_factors(cg_factor=aux_factor, ap_factor=aux_factor)
+
         t0 = time.time()
         train_loss = train_one_epoch(
             model=model,
@@ -333,6 +413,7 @@ def train_network(
         writer.add_scalar('Loss/Val', val_loss, epoch)
         writer.add_scalar('F1/Val_macro', f1_score_avg, epoch)
         writer.add_scalar('F1/Val_min', f1_score_min, epoch)
+        writer.add_scalar('Schedule/aux_factor', aux_factor, epoch)
 
         curr_macro, curr_min = f1_score_avg.item(), f1_score_min.item()
 
@@ -468,7 +549,7 @@ class Task:
         self.model_name = model_name
         self.n_bones = n_bones
 
-    def seek_network_weights(self, model_info='', serial_no=1):
+    def seek_network_weights(self, model_info='', serial_no=1, tb_dir: Path | None = None):
         """Load existing weights if found, otherwise train from scratch.
         Weight filenames encode the full experiment config, e.g.:
         'bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged_2.pt'
@@ -491,6 +572,7 @@ class Task:
         self.model_name += model_postfix
 
         weight_path = self.weight_dir / f'{save_name}.pt'
+        self.weight_path = weight_path
         if weight_path.exists():
             self.net.load_state_dict(
                 torch.load(str(weight_path), map_location=self.device, weights_only=True)
@@ -506,12 +588,13 @@ class Task:
                 save_path=weight_path,
                 n_bones=len(get_bone_pairs()) if self.pose_style != 'J_only' else 0,
                 n_classes=self.taxonomy.n_classes,
+                tb_dir=tb_dir,
             )
             t = timedelta(seconds=int(time.time() - train_t0))
             print(f'Total training time: {t}')
             return False  # newly trained
 
-    def test(self, show_details=False, show_confusion_matrix=False):
+    def test(self, show_details=False, show_confusion_matrix=False) -> dict:
         pred, gt = test(self.net, self.test_loader, self.device)
         print(f'Test (num_strokes: {len(pred)}) =>')
 
@@ -538,12 +621,20 @@ class Task:
                 save=False
             )
 
-    def test_topk_acc(self, k=2):
+        return {
+            'macro_f1':    float(f1_score_each.mean().item()),
+            'min_f1':      float(f1_score_each.min().item()),
+            'accuracy':    float(acc),
+            'num_strokes': int(len(pred)),
+        }
+
+    def test_topk_acc(self, k=2) -> dict:
         assert k > 1, 'k should be > 1'
         pred, gt = test_topk(self.net, self.test_loader, self.device, k=k)
         gt = gt.unsqueeze(1).repeat(1, k)
         acc = torch.any(pred == gt, dim=1).sum().item() / len(gt)
         print(f'Top{k} Accuracy: {acc:.3f}')
+        return {f'top{k}_accuracy': float(acc)}
 
     def compare_pred_gt_on_specific_type(self, dir_path: Path):
         infer_ds = Dataset_npy(
@@ -609,33 +700,41 @@ if __name__ == '__main__':
             model_info = additional_model_info
 
     # ----------------------------------------------------------------------
-    # Per-run weight folder.
-    # Every invocation mints a fresh weight/run_<timestamp>/ subfolder, so
-    # new training runs never collide with older weights via the
-    # seek_network_weights cache (the old flat weight/<name>.pt layout
-    # caused silent training-skips after hyperparam changes).
+    # Per-run experiment folder (tracked via run_tracker).
+    # Every invocation mints a fresh experiments/run_<timestamp>/ with:
+    #   manifest.yaml          (hyperparams, git SHA, per-serial metrics)
+    #   weights/<save_name>.pt (best checkpoint per serial)
+    #   tb/serial_N/           (TB event files per serial)
+    # Old flat weight/<name>.pt layout caused silent training-skips after
+    # hyperparam changes, so the cache is scoped to the run folder.
     #
     # To re-test an existing run without retraining, set resume_from to its
-    # folder name (e.g. 'run_20260417_091933'). The cache then finds the
-    # saved weights under weight/<resume_from>/ and skips training, just
-    # running test. Leave as None for normal fresh-train behaviour.
+    # folder name (e.g. 'run_20260417_091933'). The cache then finds saved
+    # weights under experiments/<resume_from>/weights/ and skips training.
+    # Only tracker-era runs resume cleanly; legacy weight/run_*/ folders
+    # need their .pt files copied into experiments/<id>/weights/ first.
+    # Leave as None for normal fresh-train behaviour.
     # ----------------------------------------------------------------------
     resume_from: str | None = None
 
     timestamp = f'{datetime.now():%Y%m%d_%H%M%S}'
-    weight_dir = Path('weight') / (resume_from or f'run_{timestamp}')
-    weight_dir.mkdir(parents=True, exist_ok=True)
+    run_id = resume_from or f'run_{timestamp}'
 
     # Test output is auto-teed to a timestamped log file so metrics are never
-    # lost to a dropped terminal. Training stdout stays on terminal only — TB
-    # captures it. One log file per script invocation, all 5 serials inside.
+    # lost to a dropped terminal. Training stdout stays on terminal only; TB
+    # captures it. One log file per script invocation, all serials inside.
+    # Uses the fresh invocation timestamp (not run_id) so resumed re-tests
+    # don't overwrite the original run's log file.
     log_dir = Path('test_logs')
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f'test_{timestamp}.log'
 
+    run_dir, run_id = track_run(config=hyp, run_id=run_id, log_path=log_path)
+    weight_dir = run_dir / 'weights'
+
     with open(log_path, 'w') as log_f:
         tee = Tee(sys.stdout, log_f)
-        for serial_no in range(1, 4):
+        for serial_no in range(1, 6):
             print(f'Running serial {serial_no} ...')
             task = Task(n_joints=17, taxonomy=taxonomy, weight_dir=weight_dir)
             task.prepare_dataloaders(
@@ -645,12 +744,24 @@ if __name__ == '__main__':
                 train_partial=hyp.train_partial
             )
             task.get_network_architecture(model_name='BST_CG_AP', in_channels=(3 if hyp.use_3d_pose else 2))
-            weight_exists = task.seek_network_weights(model_info=model_info, serial_no=serial_no)
+
+            tb_dir = run_dir / 'tb' / f'serial_{serial_no}'
+            weight_exists = task.seek_network_weights(
+                model_info=model_info, serial_no=serial_no, tb_dir=tb_dir,
+            )
 
             with redirect_stdout(tee):
                 print(f'\n=== Serial {serial_no} ({task.model_name}) ===')
-                task.test(show_details=False, show_confusion_matrix=False)
-                task.test_topk_acc(k=2)
+                test_metrics = task.test(show_details=False, show_confusion_matrix=False)
+                topk_metrics = task.test_topk_acc(k=2)
+
+            track_serial(
+                run_dir=run_dir,
+                serial_no=serial_no,
+                weights_path=task.weight_path,
+                tb_dir=tb_dir,
+                metrics={**test_metrics, **topk_metrics},
+            )
 
             print('Serial', serial_no, 'done.')
 
@@ -658,3 +769,4 @@ if __name__ == '__main__':
                 time.sleep(3)
 
     print(f'\nTest log saved to: {log_path}')
+    print(f'Run manifest:    {run_dir / "manifest.yaml"}')

@@ -1,0 +1,31 @@
+# Model weights + TB logs for the stroke_classification subtree.
+# Scoped here (not the repo-root .gitignore) so per-run tactical unignores
+# don't clutter the global file as more runs pile up.
+
+# Run layout: main_on_shuttleset/experiments/<run_id>/.
+# manifest.yaml + best_model_id.txt stay tracked (small, source of truth for
+# hparams + results). Weights (large) and TB event files (medium) are ignored
+# by default; tactical unignores below pick the best checkpoint(s) per run.
+main_on_shuttleset/experiments/*/weights/*
+main_on_shuttleset/experiments/*/tb/
+
+# Aim experiment tracker cache (optional UI, local only; created in cwd when
+# aim_backfill.py or `aim up` runs from main_on_shuttleset/).
+main_on_shuttleset/.aim/
+
+# Best checkpoints per run (tactical unignores).
+
+# bst_cg_ap_base_17_04_2026: pre-tracker baseline (paper hyperparams + TrackNetV3 WITH inpaint). S2 best.
+!main_on_shuttleset/experiments/bst_cg_ap_base_17_04_2026/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged_25_2.pt
+
+# run_20260417_191851: retuned-LR baseline, 120 epochs, no CG/AP anneal. S1 best on every metric.
+!main_on_shuttleset/experiments/run_20260417_191851/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged_25.pt
+
+# run_20260418_104152: first CG/AP anneal pass, 120ep / fade end 60. S3 best on every metric.
+!main_on_shuttleset/experiments/run_20260418_104152/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged_25_3.pt
+
+# run_20260418_151139: aggressive CG/AP anneal, 80ep / fade end 15. S2 best (top accuracy 0.850, macro F1 0.831).
+!main_on_shuttleset/experiments/run_20260418_151139/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged_25_2.pt
+
+# run_20260418_174238: Run A paired control, CG/AP on throughout, 80ep. S3 best (macro F1 0.828, min F1 0.603).
+!main_on_shuttleset/experiments/run_20260418_174238/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged_25_3.pt

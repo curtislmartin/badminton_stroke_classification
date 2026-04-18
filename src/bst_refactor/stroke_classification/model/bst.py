@@ -205,7 +205,28 @@ class BST(nn.Module):
 
         self.d_model = d_model
 
+        # Scheduling factors for CG/AP warm-start, scalar in [0, 1].
+        # Buffers (not Parameters): not learned, travel with .to(device), saved in state_dict.
+        # Overwritten per epoch by the trainer via set_schedule_factors().
+        self.register_buffer('cg_factor', torch.tensor(1.0))
+        self.register_buffer('ap_factor', torch.tensor(1.0))
+
         self.init_weights()
+
+    def set_schedule_factors(self, cg_factor: float, ap_factor: float):
+        """Overwrite scheduling factors for Clean Gate and Aim Player.
+
+        Called by the training loop once per epoch to implement a warm-start
+        schedule: factors start at 1.0 (full CG/AP), decay toward 0.0 so the
+        transformer backbone increasingly stands on its own.
+
+        :param cg_factor: scalar in [0, 1]; scales dirt subtraction in CG.
+        :param ap_factor: scalar in [0, 1]; blends AP alpha toward pass-through.
+        :return: None. Mutates buffers in place.
+        """
+        # .fill_() overwrites in place and preserves device/dtype after .to('cuda').
+        self.cg_factor.fill_(cg_factor)
+        self.ap_factor.fill_(ap_factor)
 
     @torch.no_grad()  # disable gradient tracking — this is init, not training
     def init_weights(self):
@@ -371,8 +392,13 @@ class BST(nn.Module):
             # alpha: (b,) in [0, 1] — higher means p1 is more relevant
             alpha = alpha.unsqueeze(1)
             # alpha: (b, 1)
-            p1_conclusion = alpha * p1_conclusion
-            p2_conclusion = (1 - alpha) * p2_conclusion
+            # Warm-start schedule: blend each multiplier toward 1.0 as ap_factor -> 0.
+            # ap_factor=1 recovers original AP; ap_factor=0 makes both multipliers exactly 1
+            # (pass-through — p1_conclusion and p2_conclusion are unchanged).
+            eff_alpha_p1 = self.ap_factor * alpha + (1 - self.ap_factor)
+            eff_alpha_p2 = self.ap_factor * (1 - alpha) + (1 - self.ap_factor)
+            p1_conclusion = eff_alpha_p1 * p1_conclusion
+            p2_conclusion = eff_alpha_p2 * p2_conclusion
 
         # ====================================================================
         # [CG] Clean Gate: remove shared player noise from shuttle
@@ -380,7 +406,8 @@ class BST(nn.Module):
         if self.use_cg:
             info_need_clean = torch.minimum(p1_shuttle_cls, p2_shuttle_cls)
             dirt = self.mlp_clean(info_need_clean)
-            shuttle_cls = shuttle_cls - dirt
+            # Warm-start schedule: cg_factor=1 applies full CG; cg_factor=0 bypasses the subtraction.
+            shuttle_cls = shuttle_cls - self.cg_factor * dirt
 
         # ====================================================================
         # MLP Head: final classification

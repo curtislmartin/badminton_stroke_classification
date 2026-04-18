@@ -1,0 +1,20 @@
+run_id: run_20260418_223850
+started_at: '2026-04-18T22:38:50'
+git_sha: e55397fa9454ef40fed38193497d6553c2b1411a
+git_dirty: false
+host: engelbart.une.edu.au
+config:
+  n_epochs: 80
+  batch_size: 128
+  lr: 0.0005
+  warm_up_step: 100
+  taxonomy: merged_25
+  seq_len: 100
+  early_stop_n_epochs: 40
+  pose_style: JnB_bone
+  use_3d_pose: false
+  train_partial: 1.0
+  use_aux_schedule: true
+  aux_fade_end_epoch: 0
+serials: []
+log_path: test_logs/test_20260418_223850.log

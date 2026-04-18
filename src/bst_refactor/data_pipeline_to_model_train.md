@@ -306,9 +306,18 @@ labels:      (batch,)
 3. **Temporal Transformer**: each of the 3 streams (player1, player2, shuttle) gets a learnable CLS token prepended, positional embeddings added, then processed by shared self-attention layers independently. Padding mask prevents attention to zero-padded frames.
 4. **Cross Transformer**: each player's frame-level representation attends to the shuttle's representation via cross-attention (player queries, shuttle provides keys+values).
 5. **Interactional Transformer**: combines player-shuttle interactions across players with another CLS token and self-attention.
-6. **CG (Clean Gate)** -- optional: subtracts shared player noise from shuttle CLS via learned MLP.
-7. **AP (Aim Player)** -- optional: weights player contributions by cosine similarity to shuttle CLS.
+6. **CG (Clean Gate)** -- optional: subtracts shared player noise from shuttle CLS via learned MLP. Scaled by `cg_factor` buffer (see CG/AP warm-start schedule below).
+7. **AP (Aim Player)** -- optional: weights player contributions by cosine similarity to shuttle CLS. Alpha multipliers blend toward pass-through via `ap_factor` buffer (see CG/AP warm-start schedule below).
 8. **MLP Head**: concatenated CLS tokens -> LayerNorm -> MLP -> class logits.
+
+#### CG/AP warm-start schedule (BST_CG_AP only)
+
+A cosine schedule fades CG and AP out across training so the transformer backbone takes over. The model holds two scalar buffers (`cg_factor`, `ap_factor`, both in `[0, 1]`) that modulate the two optional blocks:
+
+- CG: `shuttle_cls = shuttle_cls - cg_factor * dirt`. At `cg_factor=0` the subtraction vanishes.
+- AP: `eff_a_p1 = ap_factor * alpha + (1 - ap_factor)`, `eff_a_p2 = ap_factor * (1 - alpha) + (1 - ap_factor)`. At `ap_factor=0` both multipliers become exactly 1.0 (`p1_conclusion` and `p2_conclusion` pass through unchanged). At `ap_factor=1` the original AP gating is recovered.
+
+The training loop calls `model.set_schedule_factors(cg_factor, ap_factor)` once per epoch with a factor from `aux_schedule_factor(epoch, fade_end_epoch)` (cosine from 1.0 at epoch 1 to 0.0 at `fade_end_epoch`, pinned at 0 after). CG and AP currently share one factor. The buffers are part of `state_dict`, so the best-F1 checkpoint captures whichever value was active at that epoch; `task.test()` runs with those restored values, no override. Controls live in the `hyp` namedtuple in `bst_train.py` (see Stage 5).
 
 #### BST variants
 
@@ -340,11 +349,11 @@ BST_CG_AP = BST(use_ppf=True,  use_cg=True,  use_ap=True)   # Full model
 
 | Name | Role |
 |------|------|
-| `Hyp` (namedtuple) | Experiment hyperparameters: `n_epochs=1600`, `batch_size=128`, `lr=5e-4`, `warm_up_step=400`, `early_stop_n_epochs=300`, `taxonomy='merged_25'` (key into `TAXONOMIES`; options: `'une_merge_v1'`, `'merged_25'`, `'raw_35'`), `seq_len=100`, `pose_style='JnB_bone'`, `use_3d_pose=False`, `train_partial=1.0`. Edit these to configure experiments. <br><br>_**Active retune (2026-04-17):** the defaults above match the original BST paper recipe but the cosine schedule never actually decays inside our useful training window (best epoch ~41 out of 1600 per TB run `Apr17_13-04-35`). Current attempt trims `n_epochs=120`, `warm_up_step=100`, `early_stop_n_epochs=40`, and pushes the scheduler's `num_cycles` from 0.25 to 0.5 so the LR reaches 0 by end-of-schedule. Old values are preserved (commented) in `bst_train.py` for easy revert; reasoning is in the block above `hyp` there and in `scratch/architecture_notes/arch_1_directions.md` Q4._ |
+| `Hyp` (namedtuple) | Experiment hyperparameters: `n_epochs=1600`, `batch_size=128`, `lr=5e-4`, `warm_up_step=400`, `early_stop_n_epochs=300`, `taxonomy='merged_25'` (key into `TAXONOMIES`; options: `'une_merge_v1'`, `'merged_25'`, `'raw_35'`), `seq_len=100`, `pose_style='JnB_bone'`, `use_3d_pose=False`, `train_partial=1.0`, `use_aux_schedule=True`, `aux_fade_end_epoch=60`. Edit these to configure experiments. <br><br>_**Active retune (2026-04-17):** the defaults above match the original BST paper recipe but the cosine schedule never actually decays inside our useful training window (best epoch ~41 out of 1600 per TB run `Apr17_13-04-35`). Current attempt trims `n_epochs=120`, `warm_up_step=100`, `early_stop_n_epochs=40`, and pushes the scheduler's `num_cycles` from 0.25 to 0.5 so the LR reaches 0 by end-of-schedule. Old values are preserved (commented) in `bst_train.py` for easy revert; reasoning is in the block above `hyp` there and in `scratch/architecture_notes/arch_1_directions.md` Q4._ <br><br>_**CG/AP warm-start schedule (2026-04-18):** the BST_CG_AP variant now fades its two optional heuristic blocks out over training so the transformer backbone has a pure-solo phase to find its own peak. `use_aux_schedule=True` turns it on, `aux_fade_end_epoch=60` sets the epoch at which the scaling factor first reaches 0 (stays 0 after). Cosine shape, shared factor across CG and AP. At the historical peak epoch 41 the factor is ~0.23 (vs 1.0 baseline), so CG/AP contribution is cut by ~77% in the peak region; epochs 60+ run backbone only. `use_aux_schedule=False` pins the factor at 1.0 for the whole run and reproduces the unscheduled BST_CG_AP baseline exactly. Full rationale and extension path to per-module fade timings is in the block above `hyp` in `bst_train.py` and in the **Stage 4 -- CG/AP warm-start schedule** section above._ |
 | `train_one_epoch()` | Standard PyTorch training loop: forward pass, cross-entropy loss (with label smoothing 0.1), backward, optimizer step, scheduler step. Applies `RandomTranslation_batch` to joints (not bones). |
 | `validate()` | Evaluates on val set. Accumulates per-class TP/FP/FN across batches, computes macro F1 and min-class F1. |
 | `test()` | Runs inference on test set, returns `(predictions, ground_truth)` tensors. |
-| `train_network()` | Full training loop with AdamW optimizer, cosine LR schedule with warmup, early stopping on macro F1, and best-checkpoint saving. Logs per-epoch scalars (`Loss/Train`, `Loss/Val`, `F1/Val_macro`, `F1/Val_min`) plus an end-of-run **HParams** entry: best + 2nd-best macro F1 and min F1 (with their epochs), best val loss (with epoch), and `stopped_epoch`. `stopped_epoch - best/macro_f1_epoch == early_stop_n_epochs` confirms a clean early-stop vs a crash. |
+| `train_network()` | Full training loop with AdamW optimizer, cosine LR schedule with warmup, early stopping on macro F1, and best-checkpoint saving. Applies the CG/AP warm-start schedule at the top of each epoch via `model.set_schedule_factors(cg_factor, ap_factor)`. Logs per-epoch scalars (`Loss/Train`, `Loss/Val`, `F1/Val_macro`, `F1/Val_min`, `Schedule/aux_factor`) plus an end-of-run **HParams** entry: best + 2nd-best macro F1 and min F1 (with their epochs), best val loss (with epoch), and `stopped_epoch`. `stopped_epoch - best/macro_f1_epoch == early_stop_n_epochs` confirms a clean early-stop vs a crash. |
 | `Tee` (class) | Duplicates writes across multiple streams (terminal + file). Used by `__main__` to auto-tee test output to `test_logs/test_<timestamp>.log` so test metrics survive a dropped terminal. Training output stays terminal-only (TB has it). |
 | `MODELS` (dict) | Maps variant names (`'BST_0'`, `'BST'`, etc.) to pre-configured partials imported from `bst.py`. Used by `get_network_architecture()` to instantiate the model without local flag dicts. |
 | `Task` (class) | Orchestrates the full workflow: `prepare_dataloaders()` -> `get_network_architecture()` -> `seek_network_weights()` (loads existing or trains) -> `test()`. |
@@ -360,13 +369,35 @@ Task()
   .test_topk_acc(k=2)
 ```
 
-The `__main__` block runs 3 serial trials (serial_no 1-3) to measure variance. Bump the `range(1, 4)` back to `range(1, 6)` to restore the original 5-trial sweep. Each invocation mints one timestamp and uses it for both (a) a per-run weight folder `weight/run_<timestamp>/` and (b) the test log `test_logs/test_<timestamp>.log`, so artefacts for a single invocation line up on disk. All three serials' weights and test output go into that pair. `Task.test()` and `task.test_topk_acc()` are wrapped in `redirect_stdout(Tee(sys.stdout, log_f))` so test metrics land in both the terminal and the log file. Set `resume_from = '<run_folder_name>'` at the top of `__main__` to re-test an existing run's weights without retraining; leave it `None` for normal fresh-train behaviour.
+The `__main__` block runs 5 serial trials (`range(1, 6)`) to measure seed variance. Each invocation mints one timestamp and uses it to name both (a) the run folder `experiments/run_<timestamp>/` (holding `manifest.yaml`, `weights/`, and `tb/serial_N/`) and (b) the test log `test_logs/test_<timestamp>.log`, so artefacts for a single invocation line up on disk. All five serials' weights, per-serial TB event dirs, and test output land under that run folder. `Task.test()` and `task.test_topk_acc()` are wrapped in `redirect_stdout(Tee(sys.stdout, log_f))` so test metrics land in both the terminal and the log file. The script is wired into `run_tracker.py` with two function calls (`track_run` + `track_serial`) so the manifest captures hparams + per-serial metrics automatically; see the **Run tracker + aggregator** section below. Set `resume_from = '<run_folder_name>'` at the top of `__main__` to re-test an existing run's weights without retraining; leave it `None` for normal fresh-train behaviour.
 
 #### Outputs
 
-- **Model weights** (`main_on_shuttleset/weight/run_<timestamp>/*.pt`): Best-validation-F1 checkpoint per trial, saved into the invocation's run folder. The `run_*/` subfolders are git-ignored by default (reproducible and too large to track wholesale). An explicit `!` override in `.gitignore` keeps the current best-of-runs serial-2 weight tracked at the top-level `weight/` path as a shared baseline; promote a new best by copying it up to the top level and adjusting the ignore rules.
-- **TensorBoard logs** (`main_on_shuttleset/runs/<timestamp>_<hostname>/`): Per-epoch scalar curves (train/val loss, val macro/min F1) plus an **HParams** row per run with best/2nd-best macro F1 and min F1, best val loss, their epochs, and `stopped_epoch`. The HParams tab gives a sortable cross-run comparison. Tracked in git so the team can review training results. <br><br>_Structure on disk: one subfolder per `train_network()` call (one per serial), so a 3-serial invocation produces 3 timestamped subfolders two hours apart. Each subfolder holds **two** event files: a larger one (60-70 KB) with the per-epoch scalar curves written during training, and a tiny one (~1.6 KB) with the end-of-run HParams summary. PyTorch writes the HParams summary to its own event file rather than appending to the scalar file, which is why every subfolder contains two files instead of one._
-- **Test logs** (`main_on_shuttleset/test_logs/test_<timestamp>.log`): All serials' test-set output (`=== Serial N (...) ===` headers, macro F1 table, accuracy, top-2 accuracy) auto-captured so metrics survive a dropped terminal. Grep with `grep -E 'Accuracy|macro' test_logs/test_*.log` for a tidy summary.
+Every invocation writes under `main_on_shuttleset/experiments/<run_id>/`, where `<run_id>` is `run_<timestamp>` on a fresh run or the `resume_from` folder name on a re-test. That folder is the single collection point: manifest + per-serial weights + per-serial TB dirs all live side by side.
+
+- **Manifest** (`experiments/<run_id>/manifest.yaml`): source of truth for hparams, git SHA + host, per-serial metrics (`macro_f1`, `min_f1`, `accuracy`, `top2_accuracy`, `num_strokes`), paths to each serial's weight file and TB dir, plus a `log_path:` pointer back to the matching test log. Tracked in git.
+- **Best-model notes** (`experiments/<run_id>/best_model_id.txt`): freeform notes flagging the best-performing serial(s) and the config context, written by hand after eyeballing the test log. Tracked in git alongside the manifest.
+- **Model weights** (`experiments/<run_id>/weights/bst_CG_AP_..._merged_25[_N].pt`): one best-validation-F1 checkpoint per serial. Gitignored by default; `src/bst_refactor/stroke_classification/.gitignore` carries a per-run tactical `!` unignore for the serial(s) flagged in `best_model_id.txt`, so git history stays small while the best checkpoints are still shareable.
+- **TensorBoard logs** (`experiments/<run_id>/tb/serial_N/`): per-serial event directories grouped under one run folder. Launch with `tensorboard --logdir experiments/<run_id>/tb` to see all serials of a run in one view. Each subfolder holds **two** event files: a larger one (60-70 KB) with the per-epoch scalar curves (train/val loss, val macro/min F1, `Schedule/aux_factor`) and a tiny one (~1.6 KB) with the end-of-run HParams summary (best/2nd-best macro F1 and min F1, best val loss, their epochs, `stopped_epoch`). Gitignored.
+- **Test logs** (`main_on_shuttleset/test_logs/test_<timestamp>.log`): all serials' test-set output (`=== Serial N (...) ===` headers, macro F1 table, accuracy, top-2 accuracy) auto-captured via the `Tee` class so metrics survive a dropped terminal. One file per script invocation; the run's manifest points at it via `log_path:`. Grep with `grep -E 'Accuracy|macro' test_logs/test_*.log` for a quick summary across runs, or use `run_overview.py` for a proper tabulation.
+
+#### Run tracker + aggregator
+
+Cross-run comparison and the optional Aim UI are handled by the YAML-based tracker at `src/bst_refactor/run_tracker.py`. `bst_train.py` wires it in with two function calls (`track_run` + `track_serial`), so any future training script (Scott's model, a 3D CNN variant) can plug in the same way. Full details in [`src/bst_refactor/run_tracker.md`](run_tracker.md).
+
+- **`run_overview.py`** aggregates every `experiments/<run_id>/manifest.yaml` into one table with mean / stdev / max per metric across serials:
+  ```bash
+  cd main_on_shuttleset
+  python ../../run_overview.py                              # default: experiments/
+  python ../../run_overview.py -c n_epochs,use_aux_schedule -m macro_f1,min_f1
+  ```
+- **`aim_backfill.py`** mirrors every manifest into the Aim UI with per-serial test-log blocks as descriptions, auto-derived tags (`legacy`, `no_aux_anneal` / `anneal_gentle` / `anneal_aggressive` / `cg_ap_off_from_start`, `best`), and readable names. Idempotent via stable `run_hash`, so it is safe to re-run any time Aim wasn't installed during training, or after editing manifest notes / tags:
+  ```bash
+  pip install aim
+  cd main_on_shuttleset
+  python ../../aim_backfill.py
+  aim up                                                    # UI at http://localhost:43800
+  ```
 
 ---
 
