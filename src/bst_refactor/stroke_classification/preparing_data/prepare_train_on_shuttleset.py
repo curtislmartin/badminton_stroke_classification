@@ -650,14 +650,22 @@ def prepare_3d_dataset_npy_from_raw_video(
     pbar.close()
 
 
+VALID_POSE_STYLES: tuple[str, ...] = ("J_only", "JnB_interp", "JnB_bone", "Jn2B")
+
+
 def pad_and_augment_one_npy_video(
     seq_len: int,
     joints: np.ndarray,
     pos: np.ndarray,
     shuttle: np.ndarray,
     bone_pairs: list[int, int],
+    pose_styles: frozenset[str] = frozenset({"JnB_bone"}),
 ):
-    """Pad to uniform sequence length and compute bone/interpolation augmentations.
+    """Pad to uniform sequence length and compute requested pose augmentations.
+
+    Only the pose styles in ``pose_styles`` are computed and returned; the
+    derived arrays (``create_bones``, ``interpolate_joints``) are skipped if
+    nothing downstream needs them.
 
     :param seq_len: Target sequence length. Shorter clips are zero-padded; longer
         clips are strided (subsampled) to fit.
@@ -665,8 +673,12 @@ def pad_and_augment_one_npy_video(
     :param pos: Player court positions, shape (t, 2, xy).
     :param shuttle: Shuttle coordinates, shape (t, xy).
     :param bone_pairs: List of (start_joint, end_joint) index pairs for bone computation.
-    :return: Tuple of (J_only, JnB_interp, JnB_bone, Jn2B, pos, shuttle, video_len)
-        where video_len is the number of real (non-padded) frames.
+    :param pose_styles: Which pose representations to compute. Subset of
+        ``VALID_POSE_STYLES``. Defaults to ``{'JnB_bone'}`` (the only style
+        BST training has ever used in this tracker).
+    :return: Tuple of (pose_dict, pos, shuttle, video_len) where pose_dict maps
+        each requested style name to its (t, 2, K, d) array and video_len is
+        the number of real (non-padded) frames.
     """
     joints = joints.astype(np.float32)
     pos = pos.astype(np.float32)
@@ -675,15 +687,28 @@ def pad_and_augment_one_npy_video(
     joints, pos, shuttle, new_video_len = make_seq_len_same(
         seq_len, joints, pos, shuttle
     )
-    # assert len(shuttle) == seq_len, f'{seq_len}, {len(joints)}, {len(pos)}, {len(shuttle)}'
 
-    joints_interpolated = interpolate_joints(joints, bone_pairs)
-    bones = create_bones(joints, bone_pairs)
+    pose_dict: dict[str, np.ndarray] = {}
 
-    JnB_bone = np.concatenate((joints, bones), axis=-2)
-    Jn2B = np.concatenate((joints_interpolated, bones), axis=-2)
+    if "J_only" in pose_styles:
+        pose_dict["J_only"] = joints
 
-    return joints, joints_interpolated, JnB_bone, Jn2B, pos, shuttle, new_video_len
+    # bones is needed for JnB_bone and Jn2B; interpolated joints for JnB_interp and Jn2B.
+    needs_bones = bool(pose_styles & {"JnB_bone", "Jn2B"})
+    needs_interp = bool(pose_styles & {"JnB_interp", "Jn2B"})
+    bones = create_bones(joints, bone_pairs) if needs_bones else None
+    joints_interpolated = (
+        interpolate_joints(joints, bone_pairs) if needs_interp else None
+    )
+
+    if "JnB_bone" in pose_styles:
+        pose_dict["JnB_bone"] = np.concatenate((joints, bones), axis=-2)
+    if "JnB_interp" in pose_styles:
+        pose_dict["JnB_interp"] = joints_interpolated
+    if "Jn2B" in pose_styles:
+        pose_dict["Jn2B"] = np.concatenate((joints_interpolated, bones), axis=-2)
+
+    return pose_dict, pos, shuttle, new_video_len
 
 
 def collate_npy(
@@ -697,6 +722,7 @@ def collate_npy(
     drop_unknown: bool = False,
     shuttle_csv_dir: Path | None = None,
     resolution_df: pd.DataFrame | None = None,
+    pose_styles: frozenset[str] = frozenset({"JnB_bone"}),
 ):
     """Collate per-clip .npy files into stacked batch arrays for one split.
 
@@ -842,10 +868,17 @@ def collate_npy(
 
         shuttle_ls.append(shuttle)
 
+    bad_styles = set(pose_styles) - set(VALID_POSE_STYLES)
+    if bad_styles:
+        raise ValueError(
+            f"Unknown pose_styles {sorted(bad_styles)!r}; "
+            f"valid choices: {VALID_POSE_STYLES}"
+        )
+
     bone_pairs = get_bone_pairs(skeleton_format="coco")
 
-    # Pad and Create bones and Interpolate
-    print("Pad, Create bones and Interpolate ...")
+    # Pad and compute only the requested pose representations.
+    print(f"Pad, Create bones and Interpolate (pose_styles={sorted(pose_styles)}) ...")
     with ProcessPoolExecutor() as executor:
         tasks: list[Future] = []
 
@@ -858,31 +891,23 @@ def collate_npy(
                     pos=pos,
                     shuttle=shuttle,
                     bone_pairs=bone_pairs,
+                    pose_styles=pose_styles,
                 )
             )
 
-        J_ls = []
-        JnB_interp_ls = []
-        JnB_bone_ls = []
-        Jn2B_ls = []
+        pose_ls: dict[str, list[np.ndarray]] = {k: [] for k in pose_styles}
         pos_ls = []
         shuttle_ls = []
         videos_len = []
 
         for task in tasks:
-            J_only, JnB_interp, JnB_bone, Jn2B, pos, shuttle, v_len = task.result()
-            J_ls.append(J_only)
-            JnB_interp_ls.append(JnB_interp)
-            JnB_bone_ls.append(JnB_bone)
-            Jn2B_ls.append(Jn2B)
+            pose_dict, pos, shuttle, v_len = task.result()
+            for k, arr in pose_dict.items():
+                pose_ls[k].append(arr)
             pos_ls.append(pos)
             shuttle_ls.append(shuttle)
             videos_len.append(v_len)
 
-    J_only = np.stack(J_ls)
-    JnB_interp = np.stack(JnB_interp_ls)
-    JnB_bone = np.stack(JnB_bone_ls)
-    Jn2B = np.stack(Jn2B_ls)
     pos = np.stack(pos_ls)
     shuttle = np.stack(shuttle_ls)
     videos_len = np.stack(videos_len)
@@ -895,10 +920,8 @@ def collate_npy(
     if not set_dir.is_dir():
         set_dir.mkdir()
 
-    np.save(str(set_dir / "J_only.npy"), J_only)
-    np.save(str(set_dir / "JnB_interp.npy"), JnB_interp)
-    np.save(str(set_dir / "JnB_bone.npy"), JnB_bone)
-    np.save(str(set_dir / "Jn2B.npy"), Jn2B)
+    for k, arrs in pose_ls.items():
+        np.save(str(set_dir / f"{k}.npy"), np.stack(arrs))
     np.save(str(set_dir / "pos.npy"), pos)
     np.save(str(set_dir / "shuttle.npy"), shuttle)
     np.save(str(set_dir / "videos_len.npy"), videos_len)
@@ -1019,6 +1042,13 @@ def main():
              "the per-taxonomy preparing_root + "
              "'dataset[_3d]_npy_between_2_hits_with_max_limits_flat'.",
     )
+    parser.add_argument(
+        "--pose-styles",
+        default="JnB_bone",
+        help="Comma-separated pose representations to compute and save at "
+             "Step 3. Default 'JnB_bone' (the only style BST training has "
+             f"used in this tracker). Valid choices: {','.join(VALID_POSE_STYLES)}.",
+    )
 
     parser.add_argument(
         "--dry-run",
@@ -1043,16 +1073,32 @@ def main():
         f"_{'dropunk' if args.drop_unknown else 'keepunk'}"
     )
 
-    if args.seq_len == 30:
-        npy_collated_dir = preparing_root / (
-            f"dataset{str_3d}_npy_collated_{ablation_id}"
+    # Parse + validate --pose-styles.
+    pose_styles = frozenset(s.strip() for s in args.pose_styles.split(",") if s.strip())
+    bad_styles = pose_styles - set(VALID_POSE_STYLES)
+    if bad_styles:
+        parser.error(
+            f"Unknown --pose-styles entries {sorted(bad_styles)!r}; "
+            f"valid: {','.join(VALID_POSE_STYLES)}"
         )
+
+    # Collated dir naming (post-2026-04-21 convention):
+    #   npy_[3d_][seq{N}_]{ablation_id}
+    #     - '3d_' prefix only when use_3d_pose=True
+    #     - 'seq{N}_' prefix only when seq_len != 100 (the default)
+    #     - ablation_id = '{taxonomy}_{split_column}_{drop}'
+    # Shorter than the pre-Phase-2
+    # 'dataset_npy_collated_between_2_hits_with_max_limits_seq_100_...' prefix;
+    # the clip-windowing info that used to be in the name is still recorded
+    # in manifest.yaml:config.
+    three_d_tag = "3d_" if args.use_3d_pose else ""
+    seq_tag = "" if args.seq_len == 100 else f"seq{args.seq_len}_"
+    npy_collated_dir = preparing_root / (
+        f"npy_{three_d_tag}{seq_tag}{ablation_id}"
+    )
+    if args.seq_len == 30:
         default_flat_dir = preparing_root / f"dataset{str_3d}_npy_flat"
     else:  # 100
-        npy_collated_dir = preparing_root / (
-            f"dataset{str_3d}_npy_collated_between_2_hits_with_max_limits_seq_100"
-            f"_{ablation_id}"
-        )
         default_flat_dir = (
             preparing_root / f"dataset{str_3d}_npy_between_2_hits_with_max_limits_flat"
         )
@@ -1076,6 +1122,7 @@ def main():
         print(f"  split_column:     {args.split_column}")
         print(f"  drop_unknown:     {args.drop_unknown}")
         print(f"  ablation_id:      {ablation_id}")
+        print(f"  pose_styles:      {sorted(pose_styles)}")
         print(f'  homography:       {SET_INFO_DIR / "homography.csv"}')
         print(f"  resolution:       {RESOLUTION_CSV_PATH}")
         print(f'\n  Step 1 (trajectory): {"SKIP" if args.skip_trajectory else "RUN"}')
@@ -1145,6 +1192,7 @@ def main():
                 save_dir=npy_collated_dir,
                 clips_csv=args.clips_csv,
                 split_column=args.split_column,
+                pose_styles=pose_styles,
                 taxonomy=taxonomy,
                 drop_unknown=args.drop_unknown,
                 shuttle_csv_dir=args.shuttle_csv_dir,

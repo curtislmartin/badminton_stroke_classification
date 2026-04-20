@@ -635,7 +635,11 @@ def prepare_npy_collated_single_pose_loaders(
 
 if __name__ == "__main__":
     # dataset = Dataset_npy(Path('dataset_npy'), 'train', seq_len=30)
-    dataset = Dataset_npy_collated(Path('preparing_data/ShuttleSet_data/dataset_npy_collated'), 'test', train_partial=1)
-    # dataset = Dataset_npy_collated_one_side(Path('dataset_npy_collated'), 'train')
-    # dataset = Dataset_npy_collated_single_pose(Path('dataset_npy_collated'), 'train')
+    dataset = Dataset_npy_collated(
+        Path('preparing_data/ShuttleSet_data_une_merge_v1/'
+             'npy_une_merge_v1_split_v2_dropunk'),
+        'test', train_partial=1,
+    )
+    # dataset = Dataset_npy_collated_one_side(Path('npy_..._dropunk'), 'train')
+    # dataset = Dataset_npy_collated_single_pose(Path('npy_..._dropunk'), 'train')
     print(len(dataset))

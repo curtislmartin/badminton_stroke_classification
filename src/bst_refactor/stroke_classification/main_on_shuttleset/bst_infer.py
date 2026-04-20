@@ -122,8 +122,11 @@ if __name__ == '__main__':
 
     task = Task(n_joints=17)
     task.prepare_loader(
+        # Example path; update the ablation_id suffix to whichever ablation
+        # you're inferring on (e.g. une_merge_v1_split_v2_dropunk).
+        # Format: npy_[3d_][seq{N}_]{ablation_id} (prefixes only when non-default).
         npy_collated_dir=Path(f'preparing_data/ShuttleSet_data_{taxonomy.name}')
-                        /"dataset_npy_collated_between_2_hits_with_max_limits_seq_100",
+                        / f"npy_{taxonomy.name}_split_v2_dropunk",
         pose_style="JnB_bone",
     )
     task.get_network_architecture(

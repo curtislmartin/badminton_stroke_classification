@@ -40,8 +40,8 @@ What each call configures:
 - **`log_path=<path>`** (optional, on `track_run`): stored on the manifest so `aim_backfill.py` can slice per-serial blocks out of the test log later. Not needed during the live run; only matters if you want the backfill to enrich Aim descriptions.
 - **Aim mirror**: auto-activates if `aim` is pip-installed and `track_serial` has metrics. Silently skips otherwise; nothing in the training loop breaks either way.
 
-That's the whole integration. Any other train script (Scott's, a future
-3D CNN extension) can do the same two calls.
+That's the whole integration. Any other train script (Arch 2 3D CNN, or
+any future extension) can do the same two calls.
 
 ## Directory layout
 

@@ -284,6 +284,7 @@ Update `ShuttleSet/flaw_shot_records.csv`. The pipeline reads it at import time 
 | `court_utils.py` | Optional homography-based court projection utilities |
 | `verify.py` | Post-generation sanity checks |
 | `build_dataset.py` | One-command orchestrator |
+| `clip_index.py` | `build_clip_path_index(clips_dir)` helper: one-time rglob to build a `{clip_stem -> mp4 Path}` lookup for CSV-driven video-loading Datasets. Used by downstream arch code (Arch 2 3D CNN, Arch 1 wrist crop). |
 
 ## Running Individual Steps
 
@@ -303,11 +304,13 @@ Both architectures read from the same `clips/` and `shuttle_npy/` directories. T
 
 **Next step for BST:** Run `stroke_classification/preparing_data/prepare_train_on_shuttleset.py` to extract poses (MMPose) and collate into batch-ready arrays. See `data_pipeline_to_model_train.md` at the project root for the full pipeline-to-training walkthrough. For the COCO 17-keypoint joint index map, bone pairs, and JnB representations, see [`keypoints_schema.md`](../stroke_classification/preparing_data/keypoints_schema.md).
 
-```python
-# Loading clips (example)
-from pathlib import Path
-clips = sorted(Path('ShuttleSet/clips/train').rglob('*.mp4'))
+### Split + label source
 
+Split (train/val/test) and class label for every clip come from `notebooks/clips_master.csv` at collation time, not from the on-disk folder layout. The clips directory is still nested as `{split}/{Top,Bottom}_{stroke_type}/*.mp4` (Phase 3 flattening is deferred), but the `{split}/` parent reflects the historical `split_bst_baseline` partition only — any new ablation split (e.g. `split_v2`) is applied via the CSV.
+
+### Loading shuttle / label data (flat)
+
+```python
 # Loading shuttle trajectories (flat: one file per clip, named after clip stem)
 import numpy as np
 shuttle = np.load('ShuttleSet/shuttle_npy/1_1_3_2.npy')
@@ -318,5 +321,40 @@ visibility = shuttle[:, 2]    # (t,) detection confidence
 from pipeline.config import TAXONOMIES, DEFAULT_TAXONOMY
 labels_29 = TAXONOMIES[DEFAULT_TAXONOMY].class_list()  # 29 classes (une_merge_v1)
 labels_25 = TAXONOMIES['merged_25'].class_list()       # 25 classes
-labels_35 = TAXONOMIES['raw_35'].class_list()           # 35 classes
+labels_35 = TAXONOMIES['raw_35'].class_list()          # 35 classes
 ```
+
+### Loading clip frames (video-Dataset pattern)
+
+Any `Dataset` that needs per-clip video frames should use `pipeline.clip_index.build_clip_path_index` to get an O(1) `clip_stem -> Path` lookup once at `__init__` against the still-nested clips dir, then pair it with a CSV-driven split + label. Skeleton:
+
+```python
+import pandas as pd
+from torch.utils.data import Dataset
+
+from pipeline.clip_index import build_clip_path_index
+from pipeline.config import CLIPS_OUTPUT_DIR, TAXONOMIES
+
+class ClipVideoDataset(Dataset):
+    def __init__(self, clips_csv, split_column, taxonomy_name,
+                 split='train', clips_dir=CLIPS_OUTPUT_DIR):
+        df = pd.read_csv(clips_csv)
+        df = df[df[split_column] == split]
+        taxonomy = TAXONOMIES[taxonomy_name]
+        self._path_by_stem = build_clip_path_index(clips_dir)
+        self.items = [
+            (row.clip_stem, _derive_label(row, taxonomy))
+            for row in df.itertuples()
+        ]
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        stem, label = self.items[i]
+        return load_video(self._path_by_stem[stem]), label
+```
+
+`_derive_label` applies `taxonomy.merge_map` + `standalone_set` to `(row.raw_type_en, row.player_side)`, matching what `collate_npy` does for the pose/shuttle npys (see `stroke_classification/preparing_data/prepare_train_on_shuttleset.py`). Pick your own video backend (cv2, decord, torchvision.io) for `load_video`.
+
+This pattern means the nested clips layout is transparent: the same `ClipVideoDataset` works for any `split_column` in `clips_master.csv` without needing to flatten or reorganize `clips/`.

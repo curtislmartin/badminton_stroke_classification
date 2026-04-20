@@ -184,27 +184,29 @@ Key flags: `--seq-len` (30 or 100), `--taxonomy` (`une_merge_v1`, `merged_25`, o
 
 3. **Shuttle normalization** (`normalize_shuttlecock`): Shuttle xy divided by video resolution to get [0,1] range. Done at collation time (Step 3). Frames where pose detection failed (recorded in `_failed.npy` by Step 2) have their shuttle coordinates zeroed out. This zeroing is baked into the saved collated `shuttle.npy` -- the model receives pre-zeroed data, not a separate mask. The per-clip `_failed.npy` files preserve the raw boolean mask for debugging or future use, but the source `shuttle_csv/` files are never modified.
 
-4. **Padding and augmentation** (`pad_and_augment_one_npy_video`): Each sample is padded (or strided) to a fixed `seq_len` (30 or 100 frames). Four pose representations are pre-computed:
+4. **Padding and augmentation** (`pad_and_augment_one_npy_video`): Each sample is padded (or strided) to a fixed `seq_len` (30 or 100 frames). Four pose representations are supported; only those passed in `--pose-styles` (default `JnB_bone`) are computed and saved:
    - `J_only`: raw joints `(t, 2, 17, 2)`
    - `JnB_interp`: joints + bone midpoints `(t, 2, 36, 2)`
-   - `JnB_bone`: joints + bone vectors `(t, 2, 36, 2)`
+   - `JnB_bone`: joints + bone vectors `(t, 2, 36, 2)` — **default**, what BST training loads
    - `Jn2B`: interpolated joints + bone vectors `(t, 2, 55, 2)`
 
 5. **Collation** (`collate_npy`): All samples in a split are stacked into single arrays and saved:
-   - `{pose_style}.npy`, `pos.npy`, `shuttle.npy`, `videos_len.npy`, `labels.npy`
+   - `{pose_style}.npy` (one file per requested style), `pos.npy`, `shuttle.npy`, `videos_len.npy`, `labels.npy`
 
 #### Collated output structure
 
 ```
-preparing_data/ShuttleSet_data_{taxonomy.name}/dataset_npy_collated/
+preparing_data/ShuttleSet_data_{taxonomy.name}/npy_[3d_][seq{N}_]{ablation_id}/
   train/
-    J_only.npy, JnB_interp.npy, JnB_bone.npy, Jn2B.npy
+    JnB_bone.npy                                    # default single pose file
     pos.npy, shuttle.npy, videos_len.npy, labels.npy
   val/
     ...
   test/
     ...
 ```
+
+Passing `--pose-styles J_only,JnB_bone,Jn2B` (etc.) saves the listed styles instead.
 
 For example, `ShuttleSet_data_une_merge_v1/`, `ShuttleSet_data_merged_25/`, or `ShuttleSet_data_raw_35/`.
 
@@ -287,6 +289,42 @@ shuttle:     (batch, seq_len, 2)
 video_len:   (batch,)
 labels:      (batch,)
 ```
+
+#### Loading clip video frames (`pipeline/clip_index.py`)
+
+`Dataset_npy_collated` covers pose + shuttle + position streams from the npy collated dir. For any model that also needs the raw `.mp4` clip frames (Arch 2 3D CNN, Arch 1 wrist crop), the clips directory is still nested as `{split}/{Top,Bottom}_{stroke_type}/*.mp4` (Phase 3 flattening is deferred). Rather than walk the tree per `__getitem__`, use `pipeline.clip_index.build_clip_path_index(clips_dir)` to build a `{clip_stem -> Path}` lookup once at Dataset `__init__`; subsequent per-sample lookup is O(1).
+
+Skeleton showing the CSV-driven pattern (split + label come from `clips_master.csv` with taxonomy applied at init, matching how `collate_npy` builds its npy arrays):
+
+```python
+import pandas as pd
+from torch.utils.data import Dataset
+
+from pipeline.clip_index import build_clip_path_index
+from pipeline.config import CLIPS_OUTPUT_DIR, TAXONOMIES
+
+
+class ClipVideoDataset(Dataset):
+    def __init__(self, clips_csv, split_column, taxonomy_name,
+                 split='train', clips_dir=CLIPS_OUTPUT_DIR):
+        df = pd.read_csv(clips_csv)
+        df = df[df[split_column] == split]
+        taxonomy = TAXONOMIES[taxonomy_name]
+        self._path_by_stem = build_clip_path_index(clips_dir)
+        self.items = [
+            (row.clip_stem, _derive_label(row, taxonomy))
+            for row in df.itertuples()
+        ]
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        stem, label = self.items[i]
+        return load_video(self._path_by_stem[stem]), label
+```
+
+`_derive_label` applies `taxonomy.merge_map` + `standalone_set` to `(row.raw_type_en, row.player_side)` to produce an int label; see `collate_npy` in `prepare_train_on_shuttleset.py` for the canonical reference implementation. The video decoder (`load_video`) is caller's choice — cv2, decord, or torchvision.io. With this pattern the nested `clips/` layout stays transparent: any `split_column` in `clips_master.csv` (e.g. `split_bst_baseline`, `split_v2`) works without reorganizing the clips tree.
 
 ---
 
@@ -383,7 +421,7 @@ Every invocation writes under `main_on_shuttleset/experiments/<run_id>/`, where 
 
 #### Run tracker + aggregator
 
-Cross-run comparison and the optional Aim UI are handled by the YAML-based tracker at `src/bst_refactor/run_tracker.py`. `bst_train.py` wires it in with two function calls (`track_run` + `track_serial`), so any future training script (Scott's model, a 3D CNN variant) can plug in the same way. Full details in [`src/bst_refactor/run_tracker.md`](run_tracker.md).
+Cross-run comparison and the optional Aim UI are handled by the YAML-based tracker at `src/bst_refactor/run_tracker.py`. `bst_train.py` wires it in with two function calls (`track_run` + `track_serial`), so any future training script (Arch 2 3D CNN, or any further extension) can plug in the same way. Full details in [`src/bst_refactor/run_tracker.md`](run_tracker.md).
 
 - **`run_overview.py`** aggregates every `experiments/<run_id>/manifest.yaml` into one table with mean / stdev / max per metric across serials:
   ```bash
@@ -440,7 +478,7 @@ preparing_data/prepare_train_on_shuttleset.py  (--taxonomy, --split-column, --dr
   -> MMPose (2D/3D pose estimation)   # Writes {clip_stem}_*.npy flat
   -> collate_npy(clips_csv, split_column, taxonomy, ...)  # CSV-driven; stacks per ablation
     |
-    v  (produces preparing_data/ShuttleSet_data_{taxonomy.name}/dataset_npy_collated_..._{ablation_id}/)
+    v  (produces preparing_data/ShuttleSet_data_{taxonomy.name}/npy_[3d_][seq{N}_]{ablation_id}/)
     |
 validation_scripts/validate_zeroed_frames.py  # Data quality check (optional, pre-training)
   -> validation_scripts/hit_frame_lookup.py   # Hit-frame index derivation from set CSVs

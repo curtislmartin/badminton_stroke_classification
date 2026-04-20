@@ -135,7 +135,7 @@ prepare_train_on_shuttleset.py    main() dispatches 3 steps
                  |             zero shuttle coords where _failed is True
                  +-- pad_and_augment_one_npy_video() per clip (ProcessPoolExecutor)
                  +-- np.stack() all clips into batch arrays
-                 +-- save J_only.npy, JnB_interp.npy, JnB_bone.npy, Jn2B.npy, ...
+                 +-- save {pose_style}.npy per --pose-styles (default: JnB_bone.npy), ...
 ```
 
 ### Per-clip processing detail

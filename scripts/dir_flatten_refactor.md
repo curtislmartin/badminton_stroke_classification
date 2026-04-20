@@ -2,6 +2,10 @@
 
 Status as of 2026-04-21: Phase 1 + Phase 2 complete. V3 committed at 3a98149; V4 ran on engelbart 2026-04-20, best S2 macro 0.743 / min 0.432 / acc 0.766. Pre-commit gate passed (dry-run, verify_shuttle_sync, shuttle_csvs_to_npy diff, V4 re-collate diff all bit-identical; Step 2 single-clip pose writer smoke good; validate_zeroed_frames CSV-driven run sane; test_dataset.py green locally). Next user-driven steps: re-extract busted smash MMPoses against the flat writer, then V5 (`rm -r` the nested originals). Phase 3 (flatten the .mp4 clips dir) still deferred.
 
+Post-Phase-2 cosmetic: collated dir naming shortened to `npy_[3d_][seq{N}_]{ablation_id}`. Prefix tags (`3d_`, `seq{N}_`) appear only for non-default configs (2D + seq_len=100 strips both). Drops the `dataset_npy_collated_between_2_hits_with_max_limits_seq_100_...` prefix that duplicated info already in manifest.yaml. Existing V3/V4 dirs on engelbart keep their old names; the rename applies only to new runs. References updated across `prepare_train_on_shuttleset.py`, `bst_train.py`, `bst_infer.py`, `shuttleset_dataset.py.__main__`, `test_integration.py`, `data_pipeline_to_model_train.md`, `testing_guide.md`.
+
+Also landed: `--pose-styles` CLI arg on Step 3, default `JnB_bone` (the only style any committed run has used). Non-requested pose representations skip both compute and save. Cuts pose-tensor disk from ~928MB to ~232MB per ablation (~75%).
+
 ## Goals
 
 1. **Decouple labels and split assignment from physical directory layout.** Per-clip `.npy` files live flat (`{root}/{clip_stem}_*.npy`); split + label come from `clips_master.csv` at collation time. (Phase 1, done.)

@@ -750,16 +750,18 @@ if __name__ == '__main__':
     )
 
     str_3d = '_3d' if hyp.use_3d_pose else ''
+    three_d_tag = '3d_' if hyp.use_3d_pose else ''
+    # Collated dir naming (mirrors prepare_train_on_shuttleset.py main()):
+    #   npy_[3d_][seq{N}_]{ablation_id}    (prefix tags only when non-default)
     match hyp.seq_len:
         case 30:
             npy_collated_dir = (
-                f'dataset{str_3d}_npy_collated_{effective_ablation_id}'
+                f'npy_{three_d_tag}seq30_{effective_ablation_id}'
             )
             model_info = '3d' if hyp.use_3d_pose else ''
         case 100:
             npy_collated_dir = (
-                f'dataset{str_3d}_npy_collated_between_2_hits_with_max_limits_seq_100'
-                f'_{effective_ablation_id}'
+                f'npy_{three_d_tag}{effective_ablation_id}'
             )
             model_info = f'between_2_hits_with_max_limits_seq_100{str_3d}'
         case _:
