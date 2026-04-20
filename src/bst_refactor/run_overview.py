@@ -47,10 +47,15 @@ def _agg(values: list[float], stat: str) -> str:
 def _select_metric_keys(manifests: list[dict], wanted: list[str] | None) -> list[str]:
     if wanted is not None:
         return list(wanted)
-    found = set()
+    # Only auto-discover metrics whose values are scalar on at least one
+    # serial. Nested structures (e.g. per_class_f1 dicts) don't aggregate
+    # into mean/stdev/max and would surface as junk '-' columns here.
+    found: set[str] = set()
     for m in manifests:
         for s in m.get('serials', []):
-            found.update((s.get('metrics') or {}).keys())
+            for k, v in (s.get('metrics') or {}).items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    found.add(k)
     return sorted(found)
 
 

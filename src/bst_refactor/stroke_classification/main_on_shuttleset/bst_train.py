@@ -142,7 +142,7 @@ hyp = Hyp(
     batch_size=128,
     lr=5e-4,                  # initial learning rate (cosine-annealed during training)
     warm_up_step=100,         # was 400 — ~4 epochs of warmup instead of ~17
-    taxonomy='merged_25',      # key in TAXONOMIES: 'une_merge_v1', 'merged_25', 'raw_35', …
+    taxonomy='une_merge_v1',   # V3 ablation: 29-class scheme, unknown dropped.
     seq_len=100,              # frames per sample (must match data preprocessing)
     pose_style='JnB_bone',   # 'J_only'=joints, 'JnB_bone'=joints+bones, 'Jn2B'=joints+2xbones
     use_3d_pose=False,        # True for xyz keypoints, False for xy only
@@ -151,7 +151,7 @@ hyp = Hyp(
     aux_fade_end_epoch=15,    # cosine fade 1.0 -> 0.0 over epochs 1-15, then ~65 ep pure backbone (best mean macro F1)
     clips_csv=str(DEFAULT_CLIPS_CSV),  # master CSV used to collate the npy arrays this run reads
     split_column='split_bst_baseline',  # 'split_bst_baseline' or 'split_v2'
-    drop_unknown=False,                 # mirror baseline; ablations 1+2 set this True
+    drop_unknown=True,                 # mirror baseline; ablations 1+2 set this True
     ablation_id=None,                   # auto-derived from (taxonomy, split_column, drop_unknown) if None
 )
 
@@ -286,9 +286,18 @@ def validate(
     f1_score = 2 * precision * recall / (precision + recall)
     f1_score[f1_score.isnan()] = 0  # classes with no predictions get NaN -> 0
 
-    f1_score_avg = f1_score.mean()  # macro F1: unweighted mean across all classes
-    f1_score_min = f1_score.min()   # worst-performing class
-    return val_loss, f1_score_avg, f1_score_min
+    # Only classes present in the val set count toward macro/min. Without the
+    # mask, a taxonomy slot with zero ground-truth (e.g. 'unknown' when
+    # drop_unknown=True) scores F1=0 by construction and drags macro down by
+    # 1/n_classes while pinning min at 0 every epoch.
+    present = (cum_tp + cum_fn) > 0
+    if present.any():
+        f1_score_avg = f1_score[present].mean()
+        f1_score_min = f1_score[present].min()
+    else:
+        f1_score_avg = torch.tensor(0.0)
+        f1_score_min = torch.tensor(0.0)
+    return val_loss, f1_score_avg, f1_score_min, f1_score, present
 
 
 @torch.no_grad()
@@ -356,6 +365,7 @@ def train_network(
     save_path: Path,
     n_bones,
     n_classes: int,
+    class_ls: list[str],
     tb_dir: Path | None = None,
 ):
     # tb_dir lands the event files under experiments/<run_id>/tb/serial_N/ so
@@ -416,7 +426,7 @@ def train_network(
             scheduler=scheduler,
             device=device
         )
-        val_loss, f1_score_avg, f1_score_min = validate(
+        val_loss, f1_score_avg, f1_score_min, f1_per_class, present = validate(
             model=model,
             loss_fn=loss_fn,
             loader=val_loader,
@@ -445,6 +455,20 @@ def train_network(
             # deepcopy because state_dict returns references that would change as training continues
             best_state = deepcopy(model.state_dict())
             print(f'Picked! => Best value {curr_macro:.3f}')
+            # Compact per-class snapshot on new-best epochs: top-5 and bot-5
+            # of present classes, one line each. Full per-class breakdown
+            # lands in the test-time log at the end of each serial.
+            present_idx = present.nonzero(as_tuple=True)[0].tolist()
+            scored = sorted(
+                [(class_ls[i], f1_per_class[i].item()) for i in present_idx],
+                key=lambda t: t[1],
+            )
+            print('  val top5: ' + ' '.join(
+                f'{n}={v:.2f}' for n, v in reversed(scored[-5:])
+            ))
+            print('  val bot5: ' + ' '.join(
+                f'{n}={v:.2f}' for n, v in scored[:5]
+            ))
             early_stop_count = 0
         elif curr_macro > second_macro:
             second_macro, second_macro_epoch = curr_macro, epoch
@@ -607,6 +631,7 @@ class Task:
                 save_path=weight_path,
                 n_bones=len(get_bone_pairs()) if self.pose_style != 'J_only' else 0,
                 n_classes=self.taxonomy.n_classes,
+                class_ls=self.taxonomy.class_list(),
                 tb_dir=tb_dir,
             )
             t = timedelta(seconds=int(time.time() - train_t0))
@@ -620,10 +645,20 @@ class Task:
         f1_score_each = multiclass_f1_score(
             pred, gt, num_classes=self.taxonomy.n_classes, average=None
         )
+
+        # Mirror validate(): reduce only over classes present in the test set so
+        # the displayed Avg/Min and the returned dict both exclude empty slots
+        # (e.g. 'unknown' under drop_unknown=True).
+        present = torch.bincount(gt, minlength=self.taxonomy.n_classes) > 0
+        present_idx = present.nonzero(as_tuple=True)[0].tolist()
+        class_ls = self.taxonomy.class_list()
+
         show_f1_results(
             model_name=self.model_name,
-            f1_score_each=f1_score_each,
-            class_ls=pad_class_labels(self.taxonomy.class_list()),
+            f1_score_each=f1_score_each[present_idx] if present_idx else f1_score_each,
+            class_ls=pad_class_labels(
+                [class_ls[i] for i in present_idx] if present_idx else class_ls
+            ),
             show_details=show_details
         )
 
@@ -640,11 +675,23 @@ class Task:
                 save=False
             )
 
+        if present_idx:
+            macro_f1 = float(f1_score_each[present_idx].mean().item())
+            min_f1 = float(f1_score_each[present_idx].min().item())
+            per_class_f1 = {
+                class_ls[i]: float(f1_score_each[i].item()) for i in present_idx
+            }
+        else:
+            macro_f1 = 0.0
+            min_f1 = 0.0
+            per_class_f1 = {}
+
         return {
-            'macro_f1':    float(f1_score_each.mean().item()),
-            'min_f1':      float(f1_score_each.min().item()),
-            'accuracy':    float(acc),
-            'num_strokes': int(len(pred)),
+            'macro_f1':     macro_f1,
+            'min_f1':       min_f1,
+            'accuracy':     float(acc),
+            'num_strokes':  int(len(pred)),
+            'per_class_f1': per_class_f1,
         }
 
     def test_topk_acc(self, k=2) -> dict:
@@ -807,7 +854,7 @@ if __name__ == '__main__':
 
             with redirect_stdout(tee):
                 print(f'\n=== Serial {serial_no} ({task.model_name}) ===')
-                test_metrics = task.test(show_details=False, show_confusion_matrix=False)
+                test_metrics = task.test(show_details=True, show_confusion_matrix=False)
                 topk_metrics = task.test_topk_acc(k=2)
 
             track_serial(

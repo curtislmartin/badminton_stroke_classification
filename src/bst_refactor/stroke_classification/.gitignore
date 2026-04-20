@@ -32,3 +32,6 @@ main_on_shuttleset/.aim/
 
 # run_20260418_234822: Run B null arm, CG/AP always off, 80ep. S2 best (macro F1 0.830, accuracy 0.842).
 !main_on_shuttleset/experiments/run_20260418_234822/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_merged_25_2.pt
+
+# run_20260420_141629: V3 ablation, une_merge_v1 + bst baseline split + drop_unknown, 80ep. S3 best (macro 0.772, min 0.381, acc 0.791).
+!main_on_shuttleset/experiments/run_20260420_141629/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_3.pt
