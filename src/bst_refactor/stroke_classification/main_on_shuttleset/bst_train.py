@@ -50,7 +50,8 @@ DEFAULT_CLIPS_CSV = REPO_ROOT / 'notebooks' / 'clips_master.csv'
 # namedtuple is just an immutable struct: hyp.lr, hyp.batch_size, etc.
 # ==========================================================================
 # Data-source knobs (clips_csv, split_column, drop_unknown, ablation_id) feed
-# scripts/dir_flatten_refactor.md Phase 1: collation reads split + label from
+# scratch/architecture_notes/completed_general_refactors/dir_flatten_refactor.md
+# Phase 1: collation reads split + label from
 # the master CSV instead of the on-disk folder layout. ablation_id tags the
 # collated dir so multiple ablations don't collide; it defaults to a tuple of
 # (taxonomy, split_column, drop_unknown) when None.

@@ -114,7 +114,7 @@ ShuttleSet/
     {vid}_{set}_{rally}_{ball_round}.npy
 ```
 
-Split and label assignment for `shuttle_npy/` (and downstream pose npys) come from `notebooks/clips_master.csv` at collation time, not from directory structure. The clips directory stays nested for now. See `scripts/dir_flatten_refactor.md` for the migration.
+Split and label assignment for `shuttle_npy/` (and downstream pose npys) come from `notebooks/clips_master.csv` at collation time, not from directory structure. The clips directory stays nested for now. See `scratch/architecture_notes/completed_general_refactors/dir_flatten_refactor.md` for the migration.
 
 #### Key concepts
 
