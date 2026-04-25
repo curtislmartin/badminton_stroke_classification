@@ -41,3 +41,6 @@ main_on_shuttleset/.aim/
 
 # run_20260425_150548: Phase 1 sticky_anchor mixed retrain, 80ep. S3 best (macro 0.755, min 0.352, acc 0.780). Gate failed on Top_wrist_smash.
 !main_on_shuttleset/experiments/run_20260425_150548/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_3.pt
+
+# run_20260425_185421: collapsed-classes ablation on sticky_anchor data (taxonomy une_merge_v1_nosides), 80ep. S1 best (macro 0.746, min 0.424, acc 0.765, top-2 0.940).
+!main_on_shuttleset/experiments/run_20260425_185421/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides.pt

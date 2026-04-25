@@ -143,7 +143,7 @@ hyp = Hyp(
     batch_size=128,
     lr=5e-4,                  # initial learning rate (cosine-annealed during training)
     warm_up_step=100,         # was 400 — ~4 epochs of warmup instead of ~17
-    taxonomy='une_merge_v1',   # V3 ablation: 29-class scheme, unknown dropped.
+    taxonomy='une_merge_v1_nosides',   # V3 ablation: 29-class scheme, unknown dropped.
     seq_len=100,              # frames per sample (must match data preprocessing)
     pose_style='JnB_bone',   # 'J_only'=joints, 'JnB_bone'=joints+bones, 'Jn2B'=joints+2xbones
     use_3d_pose=False,        # True for xyz keypoints, False for xy only
@@ -153,7 +153,7 @@ hyp = Hyp(
     clips_csv=str(DEFAULT_CLIPS_CSV),  # master CSV used to collate the npy arrays this run reads
     split_column='split_v2',  # 'split_bst_baseline' or 'split_v2'
     drop_unknown=True,                 # mirror baseline; ablations 1+2 set this True
-    ablation_id='une_merge_v1_split_v2_dropunk_h_sticky_anchor',                   # auto-derived from (taxonomy, split_column, drop_unknown) if None
+    ablation_id='une_merge_v1_nosides_split_v2_dropunk_h_sticky_anchor',                   # auto-derived from (taxonomy, split_column, drop_unknown) if None
 )
 
 

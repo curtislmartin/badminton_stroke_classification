@@ -197,6 +197,20 @@ TAXONOMY_UNE_MERGE_V1 = Taxonomy(
     unknown_first=True,
 )
 
+# Same merge_map and stroke set as une_merge_v1, but with the Top_/Bottom_
+# side prefixes collapsed: every type lands in standalone_types so the
+# collator emits an unprefixed label (the side branch in collate_npy is
+# skipped whenever ``merged in standalone_set``). Tests whether a 14-class
+# space with double the per-class N beats the split 28-class space, on the
+# theory that Top_X and Bottom_X are spatial mirrors of the same shot.
+TAXONOMY_UNE_MERGE_V1_NOSIDES = Taxonomy(
+    name='une_merge_v1_nosides',
+    merge_map=UNE_MERGE_V1_MAP,
+    base_types=(),
+    standalone_types=tuple(STROKE_TYPES_14_UNE_MERGE_V1) + ('unknown',),
+    unknown_first=False,
+)
+
 TAXONOMY_RAW_35 = Taxonomy(
     name='raw_35',
     merge_map=None,
@@ -208,9 +222,10 @@ TAXONOMY_RAW_35 = Taxonomy(
 DEFAULT_TAXONOMY = 'une_merge_v1'
 
 TAXONOMIES: dict[str, Taxonomy] = {
-    'merged_25':    TAXONOMY_MERGED_25,
-    'une_merge_v1': TAXONOMY_UNE_MERGE_V1,
-    'raw_35':       TAXONOMY_RAW_35,
+    'merged_25':            TAXONOMY_MERGED_25,
+    'une_merge_v1':         TAXONOMY_UNE_MERGE_V1,
+    'une_merge_v1_nosides': TAXONOMY_UNE_MERGE_V1_NOSIDES,
+    'raw_35':               TAXONOMY_RAW_35,
 }
 
 
