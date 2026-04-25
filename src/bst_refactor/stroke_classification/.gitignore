@@ -38,3 +38,6 @@ main_on_shuttleset/.aim/
 
 # run_20260420_171101: V4 ablation, une_merge_v1 + split_v2 + drop_unknown, 80ep. S2 best (macro 0.743, min 0.432, acc 0.766).
 !main_on_shuttleset/experiments/run_20260420_171101/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_2.pt
+
+# run_20260425_150548: Phase 1 sticky_anchor mixed retrain, 80ep. S3 best (macro 0.755, min 0.352, acc 0.780). Gate failed on Top_wrist_smash.
+!main_on_shuttleset/experiments/run_20260425_150548/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_3.pt

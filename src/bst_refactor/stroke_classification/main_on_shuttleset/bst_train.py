@@ -153,7 +153,7 @@ hyp = Hyp(
     clips_csv=str(DEFAULT_CLIPS_CSV),  # master CSV used to collate the npy arrays this run reads
     split_column='split_v2',  # 'split_bst_baseline' or 'split_v2'
     drop_unknown=True,                 # mirror baseline; ablations 1+2 set this True
-    ablation_id=None,                   # auto-derived from (taxonomy, split_column, drop_unknown) if None
+    ablation_id='une_merge_v1_split_v2_dropunk_h_sticky_anchor',                   # auto-derived from (taxonomy, split_column, drop_unknown) if None
 )
 
 
@@ -808,9 +808,16 @@ if __name__ == '__main__':
     # captures it. One log file per script invocation, all serials inside.
     # Uses the fresh invocation timestamp (not run_id) so resumed re-tests
     # don't overwrite the original run's log file.
-    log_dir = Path('test_logs')
+    #
+    # Anchor test_logs/ and experiments/ to this file's directory so the
+    # write paths don't depend on cwd. Lets `python -m main_on_shuttleset.bst_train`
+    # from stroke_classification/ land outputs in the same place as a direct
+    # `python bst_train.py` from main_on_shuttleset/.
+    script_dir = Path(__file__).resolve().parent
+    log_dir = script_dir / 'test_logs'
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f'test_{timestamp}.log'
+    experiments_dir = script_dir / 'experiments'
 
     # Provenance: hash the master CSV so the manifest pins which CSV
     # produced this run's collated arrays. Fail fast if it's missing — the
@@ -833,6 +840,7 @@ if __name__ == '__main__':
     }
     run_dir, run_id = track_run(
         config=hyp, run_id=run_id, log_path=log_path, extra=extra,
+        experiments_dir=experiments_dir,
     )
     weight_dir = run_dir / 'weights'
 
