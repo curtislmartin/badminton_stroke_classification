@@ -123,6 +123,7 @@ These were explicitly deferred during the refactor. The reviewer (especially GOA
 
 - **Branch destination decision.** Three options on the table: open a PR for team review then merge; merge directly; sit on the branch as the working trunk and let X3D-S work branch off this. No push to main, no PR, no merge to main without explicit user go-ahead.
 - **Path/IO abstraction** (focus area 5 in the original review). Reserved for after-X3D-S.
+- **`Task`-class lift into `bst_common.py`.** Original review action 1 named `Task` as part of the lift; `MODELS` / `Tee` / `build_bst_network` / `compute_data_provenance` landed in step 5c, but `Task` stayed split between `bst_train.py:438` (references module-level `hyp` at `:444,462,479`) and `bst_infer.py:49` (a much-simpler stand-in). Defer until X3D-S's `Task` shape is visible — the lift can take that into account.
 - **`prepare_train_on_shuttleset.py` full module split** into `mmpose_extract.py` + `homography.py` + `collate.py`. Light tidy landed in step 5b; the structural split is reserved for after X3D-S.
 - **Validation script triplet shared core** (focus area 6, site 5).
 - **Bulk style passes:** AU/UK rename for `normalize_*` and "labeled"/"vectorized"; em-dash sweep; "fade" → "anneal"/"downtune".

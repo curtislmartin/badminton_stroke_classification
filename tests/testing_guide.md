@@ -17,6 +17,16 @@ This runs all tests except the HPC integration test, which auto-skips when `BST_
 
 - **Prerequisites:** Project dependencies installed (`pip install -r requirements.txt`)
 
+### `test_data_access.py`
+**`pipeline.data_access` filtering tests.** Builds a synthetic `clips_master.csv` plus a fake clips/shuttle/mmpose tree (matching post-Phase-2 layout: nested clips, flat npy) and verifies CSV-driven `get_clip_records`, `_derive_class_label`, `summarise`, and the interactive menu helpers behave correctly across taxonomies and splits.
+
+- **Prerequisites:** Project dependencies
+
+### `test_sticky_anchor.py`
+**Sticky_anchor heuristic invariant tests.** Seven pinning tests for the per-slot Voronoi + EMA tracker (`src/bst_refactor/stroke_classification/preparing_data/heuristics/sticky_anchor.py`). Synthetic-only — uses an identity-homography court at 1280x720 so picking and EMA-reset behaviour can be verified deterministically. The X3D-S wrist-crop layer will consume the same per-slot pose stream, so these invariants are pinned before that work lands.
+
+- **Prerequisites:** Project dependencies
+
 ### `test_dataset.py`
 **DataLoader batch shape validation.** Creates synthetic npy data matching the real dataset format (4 clips, 100 frames, 2 players, 17 joints) and verifies that `Dataset_npy_collated` and PyTorch `DataLoader` produce tensors with the expected shapes.
 
