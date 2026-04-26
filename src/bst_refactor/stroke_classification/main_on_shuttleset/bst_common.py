@@ -56,18 +56,16 @@ def build_bst_network(
 ) -> tuple[nn.Module, int]:
     """Construct a BST variant with feature-dim wiring shared between train and infer.
 
-    Returns ``(net, n_trailing_bone_channels)``. The second value is the count
-    of bone channels appended after the joint channels along the pose-feature
-    axis (``n_bone_pairs * POSE_BONE_MULTIPLIER[pose_style]``). It is what the
-    training loop's random-translation augmentation needs to slice human_pose
-    correctly; inference can ignore it.
+    Returns ``(net, n_bones)``. ``n_bones`` is the count of bone tokens
+    appended after the joint tokens along the pose axis of ``human_pose``
+    (``len(get_bone_pairs()) * POSE_BONE_MULTIPLIER[pose_style]``). The
+    training loop slices ``human_pose[..., -n_bones:, :]`` to keep
+    random-translation off the bone rows; inference can ignore it.
 
     :param in_channels: 2 for 2D (xy) keypoints, 3 for 3D (xyz).
     """
-    n_bone_pairs = len(get_bone_pairs())
-    pose_multiplier = POSE_BONE_MULTIPLIER[pose_style]
-    n_trailing_bone_channels = n_bone_pairs * pose_multiplier
-    in_dim = (n_joints + n_trailing_bone_channels) * in_channels
+    n_bones = len(get_bone_pairs()) * POSE_BONE_MULTIPLIER[pose_style]
+    in_dim = (n_joints + n_bones) * in_channels
     net = MODELS[model_name](
         in_dim=in_dim,
         n_class=n_class,
@@ -75,7 +73,7 @@ def build_bst_network(
         depth_tem=depth_tem,
         depth_inter=depth_inter,
     ).to(device)
-    return net, n_trailing_bone_channels
+    return net, n_bones
 
 
 def compute_data_provenance(
