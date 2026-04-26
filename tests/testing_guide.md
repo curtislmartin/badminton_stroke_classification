@@ -13,7 +13,7 @@ This runs all tests except the HPC integration test, which auto-skips when `BST_
 ## Test files
 
 ### `test_environment.py`
-**Environment sanity check.** Imports core dependencies (torch, torchvision, numpy, pandas, matplotlib, sklearn, mediapipe) and fails if any are missing. Useful after setting up a new venv.
+**Environment sanity check.** Imports core dependencies (torch, torchvision, numpy, pandas, matplotlib, sklearn) and fails if any are missing. Useful after setting up a new venv.
 
 - **Prerequisites:** Project dependencies installed (`pip install -r requirements.txt`)
 
