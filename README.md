@@ -66,7 +66,7 @@ BST training runs log through `src/bst_refactor/run_tracker.py`. Each run writes
 
 Optional Aim UI (from `main_on_shuttleset/`): `python ../../aim_backfill.py` (one-shot, idempotent), then `aim up`. Details in [`src/bst_refactor/run_tracker.md`](src/bst_refactor/run_tracker.md).
 
-There's also a partial MLflow setup in `scripts/example_mlflow_run.py` if someone wants to plug in, but it's probably more than this project needs; the manifest tracker above integrates with Aim at near-zero effort.
+There's also a partial MLflow setup in `scripts/example_mlflow_run.py` if someone wants to plug in, but it's probably more than this project needs; the manifest tracker above integrates with Aim at near-zero effort. The MLflow stub will be deleted before delivery if Scott has not picked it up by then.
 
 ---
 
