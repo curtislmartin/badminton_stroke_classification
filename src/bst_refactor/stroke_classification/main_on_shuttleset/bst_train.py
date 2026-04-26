@@ -32,7 +32,7 @@ if __name__ == '__main__':
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from preparing_data.shuttleset_dataset import prepare_npy_collated_loaders, \
-                                              RandomTranslation_batch, Dataset_npy, \
+                                              RandomTranslation_batch, \
                                               pad_class_labels, get_bone_pairs, \
                                               POSE_BONE_MULTIPLIER
 from model.bst import BST_0, BST_PPF, BST_CG, BST_AP, BST_CG_AP
@@ -82,23 +82,6 @@ Hyp = namedtuple('Hyp', [
 # length. n_epochs has since been shortened again (120 -> 80) to pair
 # with the AUX-SCHEDULE block; see that block for rationale. The old
 # values are preserved (commented) for easy revert.
-# --------------------------------------------------------------------------
-# hyp = Hyp(
-#     n_epochs=1600,            # max epochs (will early-stop before this)
-#     early_stop_n_epochs=300,  # stop if no F1 improvement for this many epochs
-#     batch_size=128,
-#     lr=5e-4,                  # initial learning rate (cosine-annealed during training)
-#     warm_up_step=400,         # LR warmup steps before cosine decay begins
-#     taxonomy='merged_25',      # key in TAXONOMIES: 'une_merge_v1', 'merged_25', 'raw_35', …
-#     seq_len=100,              # frames per sample (must match data preprocessing)
-#     pose_style='JnB_bone',   # 'J_only'=joints, 'JnB_bone'=joints+bones, 'Jn2B'=joints+2xbones
-#     use_3d_pose=False,        # True for xyz keypoints, False for xy only
-#     train_partial=1.0,        # fraction of training set to use (1.0 = all)
-#     clips_csv=str(DEFAULT_CLIPS_CSV),
-#     split_column='split_bst_baseline',
-#     drop_unknown=False,
-#     ablation_id=None,
-# )
 # --------------------------------------------------------------------------
 # AUX-SCHEDULE (CG/AP warm-start-to-fade)
 # --------------------------------------------------------------------------
@@ -381,22 +364,13 @@ def train_network(
     # model.parameters() returns all learnable weights (TF equivalent: model.trainable_variables)
     optimizer = optim.AdamW(model.parameters(), lr=hyp.lr)
     # Cosine schedule: LR ramps up during warmup, then decays following a cosine curve.
-    # See the 2026-04-17 retune block above hyp for the num_cycles 0.25 -> 0.5 reasoning.
     # HF formula: lr_factor = 0.5 * (1 + cos(pi * 2 * num_cycles * progress))
-    #   num_cycles=0.25 -> LR ends at 50% of peak (partial dropoff)
-    #   num_cycles=0.5  -> LR ends at 0 (full standard cosine descent)
-    #   num_cycles=1.0  -> LR ends back at peak (don't use — full wave)
-    # scheduler = get_cosine_schedule_with_warmup(
-    #     optimizer=optimizer,
-    #     num_warmup_steps=hyp.warm_up_step,
-    #     num_training_steps=(hyp.n_epochs * len(train_loader)),
-    #     num_cycles=0.25  # fraction of cosine cycle (0.25 = quarter-cosine decay)
-    # )
+    #   num_cycles=0.5 -> LR ends at 0 (full standard cosine descent)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=hyp.warm_up_step,
         num_training_steps=(hyp.n_epochs * len(train_loader)),  # total batches across all epochs
-        num_cycles=0.5  # was 0.25 — full cosine descent to 0 at end of schedule
+        num_cycles=0.5
     )
 
     # Track top-2 of each metric (for HParams summary + verifying early-stop vs crash)
@@ -702,35 +676,6 @@ class Task:
         acc = torch.any(pred == gt, dim=1).sum().item() / len(gt)
         print(f'Top{k} Accuracy: {acc:.3f}')
         return {f'top{k}_accuracy': float(acc)}
-
-    def compare_pred_gt_on_specific_type(self, dir_path: Path):
-        infer_ds = Dataset_npy(
-            root_dir=dir_path,
-            set_name='test_specific',
-            pose_style=self.pose_style,
-            seq_len=hyp.seq_len,
-            taxonomy=self.taxonomy,
-        )
-        infer_loader = DataLoader(
-            dataset=infer_ds,
-            batch_size=hyp.batch_size,
-        )
-
-        pred, gt = test(self.net, infer_loader, self.device)
-        pred = pred.cpu().numpy()
-        gt = gt.cpu().numpy()
-
-        not_match = pred != gt
-        class_ls = self.taxonomy.class_list()
-        with pd.option_context('display.max_rows', None):
-            df = pd.DataFrame(
-                data={
-                    'Ball Round': [Path(e).stem for e in infer_ds.data_branches],
-                    'Pred': [class_ls[e] if b else '-' for e, b in zip(pred, not_match)],
-                    'GT': [class_ls[e] if b else '-' for e, b in zip(gt, not_match)]
-                }
-            )
-            print(df)
 
 
 # ==========================================================================

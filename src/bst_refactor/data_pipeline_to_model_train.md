@@ -259,7 +259,7 @@ Bridges collated `.npy` files to PyTorch `DataLoader`s. Imports `Taxonomy` from 
 |------|------|
 | `Dataset_npy_collated` | Primary Dataset class for BST. Loads pre-collated arrays from disk. Supports `train_partial` to use a fraction of training data. Returns `(human_pose, pos, shuttle), video_len, label` per sample. **Filters out zero-length clips at load time** (see known divergence below). |
 | `prepare_npy_collated_loaders()` | Convenience function: creates train/val/test `DataLoader`s from a collated directory. |
-| `make_seq_len_same()` | Pads or strides a sample to match `seq_len`. Shared between `Dataset_npy` and `collate_npy`. |
+| `make_seq_len_same()` | Pads or strides a sample to match `seq_len`. Used by `collate_npy`. |
 | `create_bones()` / `interpolate_joints()` | Bone vector and midpoint computation from joint arrays. |
 | `POSE_BONE_MULTIPLIER` | Dict mapping pose style names to bone-set multipliers: `{'J_only': 0, 'JnB_bone': 1, 'JnB_interp': 1, 'Jn2B': 2}`. Used by train/infer scripts to compute `in_dim`. |
 | `pad_class_labels()` | Pads class label strings to uniform width for aligned F1 display. |
@@ -333,7 +333,7 @@ For ad-hoc queries or when a Dataset wants a higher-level "give me clip + shuttl
 
 | Module | Role |
 |--------|------|
-| `tempose.py` | Building blocks reused by BST: `TCN` (dilated 1D temporal convolutions), `MLP`, `MLP_Head` (LayerNorm + MLP), `FeedForward` (MLP + Dropout), `MultiHeadAttention`, `TransformerLayer`, `TransformerEncoder`. Also contains standalone TemPose variants (`TemPose_V`, `TemPose_PF`, `TemPose_SF`, `TemPose_TF`). |
+| `tempose.py` | Building blocks reused by BST: `TCN` (dilated 1D temporal convolutions), `MLP`, `MLP_Head` (LayerNorm + MLP), `FeedForward` (MLP + Dropout), `MultiHeadAttention`, `TransformerLayer`, `TransformerEncoder`. The four standalone TemPose variants (`TemPose_V`/`PF`/`SF`/`TF`) were excised pre-phase-2 and live verbatim in `scratch/architecture_notes/historical_bst.md` section 1. |
 | `bst.py` | The BST model. Imports `TCN`, `FeedForward`, `MLP`, `MLP_Head`, `TransformerEncoder` from `tempose.py`. Adds `MultiHeadCrossAttention` and `CrossTransformerLayer` for player-shuttle interaction. Also defines pre-configured variant partials (`BST_0`, `BST_PPF`, `BST_CG`, `BST_AP`, `BST_CG_AP`) — these are the single source of truth for variant flag combinations, imported by the train/infer scripts. |
 
 #### BST architecture (forward pass)
@@ -527,7 +527,7 @@ BST's dataset classes return a specific tuple format: `(human_pose, pos, shuttle
 - **If your model expects different inputs**: write a new Dataset class. Key decisions:
   - Does your model need all 3 input streams (pose, position, shuttle)? BST uses all three. TemPose variants use subsets.
   - Does your model handle variable-length sequences internally (e.g. via packed sequences or attention masks), or does it need pre-padded fixed-length input? BST uses fixed-length padding + a `video_len` mask.
-  - Does your model operate on pre-collated batched arrays, or per-clip files? The `Dataset_npy_collated` class loads everything into RAM at init; `Dataset_npy` loads per-clip lazily.
+  - Does your model operate on pre-collated batched arrays, or per-clip files? `Dataset_npy_collated` loads pre-collated arrays into RAM at init; if a future model needs lazy per-clip loading, write a new Dataset (the legacy `Dataset_npy` lazy loader was excised pre-phase-2; the verbatim source is in `scratch/architecture_notes/historical_bst.md` section 4.1).
 
 - **Label list construction**: All class labels are now English. Use `taxonomy.class_list()` from any `Taxonomy` instance in `pipeline.config.TAXONOMIES` to get the label list. Pipeline default is `TAXONOMIES[DEFAULT_TAXONOMY]` (`une_merge_v1`, 29 classes). Available taxonomies: `'une_merge_v1'`, `'une_merge_v1_nosides'`, `'merged_25'`, `'raw_35'`. To add a custom taxonomy, define it in `pipeline/config.py` (see the `Taxonomy` dataclass and existing instances for the pattern).
 
