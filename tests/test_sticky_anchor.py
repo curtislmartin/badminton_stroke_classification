@@ -25,6 +25,7 @@ from src.bst_refactor.stroke_classification.preparing_data.heuristics.base impor
 from src.bst_refactor.stroke_classification.preparing_data.heuristics.sticky_anchor import (
     SLOT_BOTTOM,
     SLOT_TOP,
+    StickyAnchorParams,
     _pick_one_frame,
     _run_clip,
 )
@@ -121,18 +122,9 @@ def _identity_normalize_joints(arr, bbox, v_height, center_align):
     return np.asarray(arr, dtype=np.float64)
 
 
-def _pick_kwargs(**overrides):
-    """Default _pick_one_frame keyword args, matching ``apply()``'s defaults."""
-    base = {
-        "prior_weight": 0.75,
-        "sanity_ceiling": 0.6,
-        "generous_margin": 0.15,
-        "score_filter": 0.2,
-        "tiebreaker_tol": 0.05,
-        "sitting_threshold": -0.3,
-    }
-    base.update(overrides)
-    return base
+def _params(**overrides) -> StickyAnchorParams:
+    """Build a StickyAnchorParams with optional field overrides."""
+    return StickyAnchorParams(**overrides)
 
 
 # -- Test 1: Voronoi partition picks the right side --------------------------
@@ -151,7 +143,7 @@ def test_voronoi_partition_picks_correct_side():
     bot_kps = _standing_kps_for_bbox(bot_bbox)
 
     raw = _build_raw_clip([[(top_bbox, top_kps, 0.9), (bot_bbox, bot_kps, 0.9)]])
-    res = _pick_one_frame(raw, 0, ema, halfcourt_centre, ctx, **_pick_kwargs())
+    res = _pick_one_frame(raw, 0, ema, halfcourt_centre, ctx, _params())
     assert res is not None
     picks, court_base_pos, _, _ = res
     assert picks[SLOT_TOP] == 0  # candidate 0 is the upper one
@@ -159,7 +151,7 @@ def test_voronoi_partition_picks_correct_side():
 
     # Swap input order: the assignment must not depend on candidate order.
     raw_swapped = _build_raw_clip([[(bot_bbox, bot_kps, 0.9), (top_bbox, top_kps, 0.9)]])
-    res = _pick_one_frame(raw_swapped, 0, ema, halfcourt_centre, ctx, **_pick_kwargs())
+    res = _pick_one_frame(raw_swapped, 0, ema, halfcourt_centre, ctx, _params())
     assert res is not None
     picks, *_ = res
     assert picks[SLOT_TOP] == 1
@@ -182,7 +174,7 @@ def test_bottom_first_with_cross_slot_exclusion():
         (bbox_a, _standing_kps_for_bbox(bbox_a), 0.9),
         (bbox_b, _standing_kps_for_bbox(bbox_b), 0.9),
     ]])
-    res = _pick_one_frame(raw, 0, ema, halfcourt_centre, ctx, **_pick_kwargs())
+    res = _pick_one_frame(raw, 0, ema, halfcourt_centre, ctx, _params())
     assert res is not None
     picks, *_ = res
 
@@ -224,8 +216,8 @@ def test_sitting_tiebreaker_prefers_standing_then_falls_back():
         (bot_bbox, bot_kps, 0.9),
     ]])
     # sanity_ceiling generous so the standing cand at norm y=0.255 stays eligible.
-    kw = _pick_kwargs(tiebreaker_tol=0.05)
-    res = _pick_one_frame(raw, 0, ema, halfcourt_centre, ctx, **kw)
+    kw = _params(tiebreaker_tol=0.05)
+    res = _pick_one_frame(raw, 0, ema, halfcourt_centre, ctx, kw)
     assert res is not None
     picks, *_ = res
     assert picks[SLOT_TOP] == 1, "non-sitting candidate should win the tiebreaker"
@@ -239,7 +231,7 @@ def test_sitting_tiebreaker_prefers_standing_then_falls_back():
         (bbox_standing, _sitting_kps_for_bbox(bbox_standing), 0.9),
         (bot_bbox, bot_kps, 0.9),
     ]])
-    res = _pick_one_frame(raw_both_sit, 0, ema, halfcourt_centre, ctx, **kw)
+    res = _pick_one_frame(raw_both_sit, 0, ema, halfcourt_centre, ctx, kw)
     assert res is not None
     picks, *_ = res
     assert picks[SLOT_TOP] == 0, "fallback should revert to argmin when all candidates sit"
@@ -265,7 +257,7 @@ def test_rally_presence_rejects_when_both_picks_far_off_court():
     ]])
     res = _pick_one_frame(
         raw, 0, ema, halfcourt_centre, ctx,
-        **_pick_kwargs(sanity_ceiling=5.0, generous_margin=0.15),
+        _params(sanity_ceiling=5.0, generous_margin=0.15),
     )
     assert res is None, "both picks far outside court must trigger rally-presence rejection"
 
@@ -288,7 +280,7 @@ def test_full_frame_failure_resets_ema():
     frame_1: list = []
 
     raw = _build_raw_clip([frame_0, frame_1])
-    output, ema_history = _run_clip(raw, ctx, _identity_normalize_joints)
+    output, ema_history = _run_clip(raw, ctx, _identity_normalize_joints, _params())
 
     assert output.failed[0] == False  # frame 0 picks both slots
     assert output.failed[1] == True   # frame 1 zero detections
@@ -322,7 +314,7 @@ def test_mixed_pick_resets_only_unpicked_slot():
         (bot_only_bbox, _standing_kps_for_bbox(bot_only_bbox), 0.9),
     ]
     raw = _build_raw_clip([frame_0, frame_1])
-    output, ema_history = _run_clip(raw, ctx, _identity_normalize_joints)
+    output, ema_history = _run_clip(raw, ctx, _identity_normalize_joints, _params())
 
     # Frame 1: Top EMA reset to (0.5, 0.25); Bottom EMA continued to advance.
     np.testing.assert_allclose(ema_history[1, SLOT_TOP], halfcourt[SLOT_TOP], atol=1e-12)
@@ -353,9 +345,11 @@ def test_update_gate_eps_blocks_off_court_update():
     raw = _build_raw_clip([frame_0])
     output, ema_history = _run_clip(
         raw, ctx, _identity_normalize_joints,
-        sanity_ceiling=2.0,
-        generous_margin=2.0,  # disable rally-presence rejection for this test
-        update_gate_eps=0.01,
+        _params(
+            sanity_ceiling=2.0,
+            generous_margin=2.0,  # disable rally-presence rejection for this test
+            update_gate_eps=0.01,
+        ),
     )
 
     # Both picks land (rally-presence is widened above), but only the

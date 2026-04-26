@@ -47,6 +47,7 @@ from pipeline.config import RESOLUTION_CSV_PATH, SET_INFO_DIR  # noqa: E402
 from pipeline.court_utils import get_court_info  # noqa: E402
 
 from preparing_data.heuristics import REGISTRY, ClipContext, RawClip  # noqa: E402
+from preparing_data.heuristics.sticky_anchor import StickyAnchorParams  # noqa: E402
 
 
 RAW_SUFFIXES = (
@@ -263,28 +264,27 @@ def run(
 
 
 def _add_hyperparam_args(parser: argparse.ArgumentParser) -> None:
-    """Hyperparam CLI block. ``current`` ignores these; ``sticky_anchor`` uses them."""
-    parser.add_argument("--prior-weight", type=float, default=0.75)
-    parser.add_argument("--ema-alpha", type=float, default=0.1)
-    parser.add_argument("--sanity-ceiling", type=float, default=0.6)
-    parser.add_argument("--generous-margin", type=float, default=0.15)
-    parser.add_argument("--score-filter", type=float, default=0.2)
-    parser.add_argument("--tiebreaker-tol", type=float, default=0.05)
-    parser.add_argument("--sitting-threshold", type=float, default=-0.3)
-    parser.add_argument("--update-gate-eps", type=float, default=0.01)
+    """Hyperparam CLI block, derived from StickyAnchorParams field names + defaults.
+
+    ``current`` ignores these; ``sticky_anchor`` consumes them. Single source
+    of truth lives on the dataclass so adding a field here means editing it
+    in one place.
+    """
+    from dataclasses import fields  # local import keeps the module-level imports tidy
+
+    # All fields on StickyAnchorParams are float; the dataclass annotations
+    # are stringified by ``from __future__ import annotations`` so we
+    # hard-code the argparse type rather than evaluating field.type strings.
+    for field in fields(StickyAnchorParams):
+        flag = "--" + field.name.replace("_", "-")
+        parser.add_argument(flag, type=float, default=field.default)
 
 
 def _hyperparam_dict_from_args(args: argparse.Namespace) -> dict:
-    return {
-        "prior_weight": args.prior_weight,
-        "ema_alpha": args.ema_alpha,
-        "sanity_ceiling": args.sanity_ceiling,
-        "generous_margin": args.generous_margin,
-        "score_filter": args.score_filter,
-        "tiebreaker_tol": args.tiebreaker_tol,
-        "sitting_threshold": args.sitting_threshold,
-        "update_gate_eps": args.update_gate_eps,
-    }
+    """Marshal argparse values into the kwargs accepted at the registry boundary."""
+    from dataclasses import fields
+
+    return {f.name: getattr(args, f.name) for f in fields(StickyAnchorParams)}
 
 
 def main() -> int:
