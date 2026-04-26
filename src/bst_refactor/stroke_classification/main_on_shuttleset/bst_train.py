@@ -15,8 +15,6 @@ from torcheval.metrics.functional import multiclass_f1_score
 
 from transformers import get_cosine_schedule_with_warmup  # from HuggingFace, not a custom module
 
-import hashlib
-import pandas as pd
 from pathlib import Path
 from copy import deepcopy
 from collections import namedtuple
@@ -33,9 +31,7 @@ if __name__ == '__main__':
 
 from preparing_data.shuttleset_dataset import prepare_npy_collated_loaders, \
                                               RandomTranslation_batch, \
-                                              pad_class_labels, get_bone_pairs, \
-                                              POSE_BONE_MULTIPLIER
-from model.bst import BST_0, BST_PPF, BST_CG, BST_AP, BST_CG_AP
+                                              pad_class_labels
 from result_utils import show_f1_results, plot_confusion_matrix
 from pipeline.config import (
     TAXONOMIES,
@@ -44,6 +40,7 @@ from pipeline.config import (
     derive_npy_collated_dir_basename,
 )
 from run_tracker import track_run, track_serial
+from bst_common import Tee, build_bst_network, compute_data_provenance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -500,27 +497,6 @@ def train_network(
 # Task: orchestrates data loading, model creation, training, and evaluation
 # ==========================================================================
 
-# BST variant name -> pre-configured constructor (partials defined in bst.py)
-MODELS = {
-    'BST_0':     BST_0,
-    'BST':       BST_PPF,
-    'BST_CG':    BST_CG,
-    'BST_AP':    BST_AP,
-    'BST_CG_AP': BST_CG_AP,
-}
-
-
-class Tee:
-    """Duplicate writes across multiple streams (e.g. terminal + log file)."""
-    def __init__(self, *streams):
-        self.streams = streams
-    def write(self, data):
-        for s in self.streams:
-            s.write(data)
-    def flush(self):
-        for s in self.streams:
-            s.flush()
-
 
 class Task:
     def __init__(self, n_joints=17, taxonomy: Taxonomy = None,
@@ -557,20 +533,16 @@ class Task:
     def get_network_architecture(self, model_name='BST_CG_AP', in_channels=2):
         """Create model with the right input dimensions and optional modules.
         in_channels: 2 for 2D (xy) keypoints, 3 for 3D (xyz)."""
-        ModelClass = MODELS[model_name]  # pre-configured partial from bst.py
-        n_bones = len(get_bone_pairs())  # 19 bone vectors for COCO 17-joint skeleton
-        extra = POSE_BONE_MULTIPLIER[self.pose_style]
-
-        self.net = ModelClass(
-            in_dim=(self.n_joints + n_bones * extra) * in_channels,
+        self.net, self.n_bones = build_bst_network(
+            model_name,
+            n_joints=self.n_joints,
+            pose_style=self.pose_style,
+            in_channels=in_channels,
             n_class=self.taxonomy.n_classes,
             seq_len=hyp.seq_len,
-            depth_tem=2,       # 2 layers in temporal transformer
-            depth_inter=1,     # 1 layer in interactional transformer
-        ).to(self.device)  # move entire model to GPU/CPU
-
+            device=self.device,
+        )
         self.model_name = model_name
-        self.n_bones = n_bones
 
     def seek_network_weights(self, model_info='', serial_no=1, tb_dir: Path | None = None):
         """Load existing weights if found, otherwise train from scratch.
@@ -757,25 +729,11 @@ if __name__ == '__main__':
     log_path = log_dir / f'test_{timestamp}.log'
     experiments_dir = script_dir / 'experiments'
 
-    # Provenance: hash the master CSV so the manifest pins which CSV
-    # produced this run's collated arrays. Fail fast if it's missing — the
-    # same CSV must have been used to generate the collated dir below.
-    clips_csv_path = Path(hyp.clips_csv)
-    if not clips_csv_path.exists():
-        raise FileNotFoundError(
-            f'hyp.clips_csv does not exist: {clips_csv_path}\n'
-            f'  (Run preparing_data.prepare_train_on_shuttleset to generate '
-            f'the collated arrays first.)'
-        )
-    clips_csv_sha = hashlib.sha256(clips_csv_path.read_bytes()).hexdigest()
-    extra = {
-        'data_provenance': {
-            'clips_csv_path': str(clips_csv_path),
-            'clips_csv_sha256': clips_csv_sha,
-            'effective_ablation_id': effective_ablation_id,
-            'npy_collated_dir': npy_collated_dir,
-        },
-    }
+    extra = compute_data_provenance(
+        clips_csv_path=Path(hyp.clips_csv),
+        effective_ablation_id=effective_ablation_id,
+        npy_collated_dir=npy_collated_dir,
+    )
     run_dir, run_id = track_run(
         config=hyp, run_id=run_id, log_path=log_path, extra=extra,
         experiments_dir=experiments_dir,

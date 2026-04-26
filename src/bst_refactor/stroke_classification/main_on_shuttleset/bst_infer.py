@@ -3,13 +3,6 @@
 # Suitable as a backend for Gradio GUI — call task.infer() to get predictions.
 #
 # See bst_train.py for detailed PyTorch/TF comparison comments.
-#
-# TODO (dedup): the MODELS dict, the Task scaffolding (device detect,
-# get_network_architecture, pose_style/in_dim math), and the dataloader
-# plumbing here overlap heavily with bst_train.py. When a third entry point
-# lands (Gradio, ONNX export, etc.), extract a bst_common.py with MODELS,
-# a base Task, and the shared dataloader helpers. Not worth doing with only
-# two call sites. Captured in scratch/architecture_notes/arch_1_directions.md.
 
 import torch
 from torch import Tensor, nn
@@ -23,20 +16,9 @@ if __name__ == '__main__':
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from preparing_data.shuttleset_dataset import Dataset_npy_collated, get_bone_pairs, \
-                                              POSE_BONE_MULTIPLIER
-from model.bst import BST_0, BST_PPF, BST_CG, BST_AP, BST_CG_AP
+from preparing_data.shuttleset_dataset import Dataset_npy_collated
 from pipeline.config import TAXONOMIES, DEFAULT_TAXONOMY, Taxonomy
-
-
-# BST variant name -> pre-configured constructor (partials defined in bst.py)
-MODELS = {
-    'BST_0':     BST_0,
-    'BST':       BST_PPF,
-    'BST_CG':    BST_CG,
-    'BST_AP':    BST_AP,
-    'BST_CG_AP': BST_CG_AP,
-}
+from bst_common import build_bst_network
 
 
 @torch.no_grad()  # no gradient tracking needed for inference — saves memory
@@ -96,17 +78,15 @@ class Task:
         if taxonomy is None:
             taxonomy = TAXONOMIES[DEFAULT_TAXONOMY]
         self.taxonomy = taxonomy
-        ModelClass = MODELS[model_name]  # pre-configured partial from bst.py
-        n_bones = len(get_bone_pairs())
-        extra = POSE_BONE_MULTIPLIER[self.pose_style]
-
-        self.net = ModelClass(
-            in_dim=(self.n_joints + n_bones * extra) * in_channels,
+        self.net, _n_bones = build_bst_network(
+            model_name,
+            n_joints=self.n_joints,
+            pose_style=self.pose_style,
+            in_channels=in_channels,
             n_class=taxonomy.n_classes,
             seq_len=seq_len,
-            depth_tem=2,
-            depth_inter=1,
-        ).to(self.device)
+            device=self.device,
+        )
 
     def load_weight(self, weight_path: Path):
         self.net.load_state_dict(torch.load(str(weight_path), map_location=self.device, weights_only=True))
