@@ -7,9 +7,9 @@ This is the operational plan for executing the agreed tidy actions before the X3
 
 ---
 
-## Execution status (2026-04-26, post-step-P)
+## Execution status (2026-04-26, post-step-Q)
 
-All 12 planned commits + step P land on `pre-phase-2-tidy`:
+All 12 planned commits + steps P and Q land on `pre-phase-2-tidy`. Refactor verified end-to-end on both laptop and engelbart:
 
 | # | Commit | Step |
 |---|---|---|
@@ -32,32 +32,32 @@ All 12 planned commits + step P land on `pre-phase-2-tidy`:
 | — | `412f6e5` | Add `scratch/post_tidy_smoke/` bit-exact verification scripts |
 | — | `25e0308` | Smoke-script sys.path fix (workaround; superseded by step P) |
 | P | `fd12cd8` | Step P — Proper-packages refactor (see section below) |
-| Q | (this commit) | Step Q — Lint-debt cleanup (see section below) |
+| Q | `c29e97c` | Step Q — Lint-debt cleanup (see section below) |
 
 ### Remote gate (engelbart) status
 
 | Check | Status | Evidence |
 |---|---|---|
 | Byte-identity gate (50-clip hit-zone) | ✅ PASS | 50/50 stems exact, max abs diff 0.0 on `_pos`/`_joints` |
-| `pytest tests/` with `BST_DATA_DIR` set | ✅ PASS | 43/43 (after `57655aa` fixed pre-existing env mismatches) |
+| `pytest tests/` with `BST_DATA_DIR` set | ✅ PASS | 43/43 (after `57655aa` fixed pre-existing env mismatches); re-confirmed 43/43 on engelbart post-step-P (`fd12cd8`) and post-step-Q (`c29e97c`). Engelbart wall-time dropped ~11s → ~9s after step P, consistent with regular-package imports skipping the namespace-package fallback that was triggered by the absent `__init__.py` files. |
 | 2-epoch smoke train comparison | ✅ PASS | `run_20260426_115321` (post-tidy) vs `run_20260426_120039` (main); curves within run-to-run noise; manifest `config:` and `data_provenance.npy_collated_dir` byte-identical |
-| `bst_infer` bit-exact (smoke_infer_bit_exact.py) | ✅ PASS | 4202/4202 predictions IDENTICAL between post-tidy and main (run on engelbart 2026-04-26 with `CUBLAS_WORKSPACE_CONFIG=:4096:8`) |
+| `bst_infer` bit-exact (smoke_infer_bit_exact.py) | ✅ PASS | 4202/4202 predictions IDENTICAL between post-tidy and main (run on engelbart 2026-04-26 with `CUBLAS_WORKSPACE_CONFIG=:4096:8`). Re-run not needed for steps P/Q — both are import-only / lint-only and cannot perturb the forward pass. |
 | `prepare_2d` bit-exact (line-by-line diff review) | ✅ PASS | Per-line behavioural diff between pre-tidy and post-tidy `prepare_2d`/`prepare_3d`/`_prepare_dataset_from_raw_video` confirms bit-exact-by-construction: same iteration order, same resume marker, same kwargs forwarded to `detect_players_2d`/`3d`, same save order, same gc/empty_cache cadence. Pure structural deduplication, no behavioural delta possible. The `smoke_prepare_2d_bit_exact.py` GPU-runtime check is therefore redundant. |
 
 ### Branch destination
 
 Decision still pending. Options on the table:
 1. Open a PR for team review, then merge to main.
-2. Merge to main directly once both pending checks tick off.
+2. Merge to main directly.
 3. Sit on the branch as the working trunk; X3D-S work branches off this.
 
----
+This is the only open thread before phase 2 starts. Pick one when ready; no push to main, no PR, no merge happens without explicit go-ahead.
 
 ---
 
-## Branch destination
+## Branch destination (history)
 
-**Decision:** sit on the `pre-phase-2-tidy` branch after local tests pass. After remote tests pass, the user will decide. No push, no PR, no merge to main without explicit go-ahead.
+**Original stance during execution:** sit on the `pre-phase-2-tidy` branch until local tests pass, then engelbart tests, then user decides. No push, no PR, no merge to main without explicit go-ahead. (Followed verbatim through steps 1–Q. Branch was pushed to origin once the user authorised it for engelbart pulls.)
 
 ## X3D-S wire-in invariant
 
@@ -423,7 +423,7 @@ That is why bare imports like `from bst_common import build_bst_network` resolve
 | Live exec of `scratch/post_tidy_smoke/smoke_infer_bit_exact.py` (script body up to `main()`), checking `Task` and `TAXONOMIES` are bound | ✅ `Task` resolves to `main_on_shuttleset.bst_infer.Task`, 4 taxonomies loaded |
 | `pytest tests/` | ✅ 42 passed, 1 skipped (matches pre-step-P baseline; the 1 skip is `test_integration` without `BST_DATA_DIR`) |
 
-**Verification (engelbart, post-push):** pull, then `pytest tests/` with `BST_DATA_DIR` set (expect 43/43). Optionally re-run the failsafe byte-identity gate and `smoke_infer_bit_exact.py` for belt-and-braces; both should remain bit-exact since step P is import-only.
+**Verification (engelbart, post-push):** ✅ 43/43 with `BST_DATA_DIR` set. Wall-time dropped ~11s → ~9s, consistent with regular-package imports skipping the namespace-package fallback the no-`__init__.py` layout used to trigger. Bit-exact gates not re-run because step P is import-only and cannot perturb the forward pass.
 
 **Net result on noqa weight:** ~22 of 30 noqa tags removed automatically (every `# noqa: E402` that sat below a sys.path block, plus several `# noqa: PLC0415` that were forced because sys.path setup needed to run first). Remaining survivors are addressed by step Q.
 
@@ -457,6 +457,8 @@ Recap of the entry state: 30 noqa tags accumulated across recent branches. Step 
 | Live import of `apply_heuristic`, `sticky_anchor`, `current`, plus `from pipeline.data_access import load_repo_dotenv` | ✅ resolves cleanly under the documented PYTHONPATH |
 
 **Net noqa tally after step Q:** removed 5 noqa tags outright (1 F401, 2 BLE001, 2 PLC0415), kept 2 PLC0415 with justifying comments. The only pipeline-package noqas left are deliberate re-exports in `verify.py`, `build_dataset.py`, `clip_generator.py` (F401 by design — pre-existing pattern, not new lint debt).
+
+**Verification (engelbart, post-push):** ✅ 43/43 with `BST_DATA_DIR` set. Bit-exact gates not re-run because step Q is import-rename + exception narrowing + same-module-top lift only — no behavioural delta possible on inputs the happy path actually sees. Combined with step P, end-to-end pytest wall-time on engelbart dropped from ~11s to ~9s and stayed there.
 
 ---
 
