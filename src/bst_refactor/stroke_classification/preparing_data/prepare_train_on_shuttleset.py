@@ -49,6 +49,8 @@ from pipeline.config import (
     TAXONOMIES,
     TAXONOMY_UNE_MERGE_V1,
     DEFAULT_TAXONOMY,
+    derive_ablation_id,
+    derive_npy_collated_dir_basename,
 )
 
 
@@ -530,28 +532,29 @@ def prepare_trajectory(
                 )
 
 
-def prepare_2d_dataset_npy_from_raw_video(
+def _prepare_dataset_from_raw_video(
     my_clips_folder: Path,
     save_root_dir: Path,
-    resolution_df: pd.DataFrame,
-    all_court_info: dict,
-    joints_normalized_by_v_height=False,
-    joints_center_align=False,
+    detect_fn,
+    detect_kwargs: dict,
 ):
-    """Run MMPose 2D pose estimation on clips and save per-clip .npy files.
+    """Shared per-clip MMPose iteration for 2D and 3D pose extraction.
 
-    For each clip, detects player keypoints (COCO 17-joint), extracts court
-    positions via homography, and normalizes joints. Saves _joints.npy,
-    _pos.npy, _failed.npy per clip. Shuttle data is handled separately at
-    collation time to keep this step focused on pose estimation only.
+    For each clip in ``my_clips_folder``: skip if ``{stem}_failed.npy`` already
+    exists (resume marker), otherwise call ``detect_fn(**detect_kwargs, video_path=...)``
+    to get ``(failed_ls, players_positions, joints)``, save the three .npy
+    outputs, and free GPU memory.
+
+    The resume marker is `_failed.npy` because it is saved last; its presence
+    means all three outputs are complete for the clip. Shuttle data is read
+    from the canonical pipeline CSV dir at collation (Step 3); this expensive
+    GPU step stays focused solely on pose estimation.
 
     :param my_clips_folder: Directory containing clip .mp4 files (searched recursively).
     :param save_root_dir: Output directory for per-clip .npy files.
-    :param resolution_df: DataFrame with video resolutions, indexed by video ID.
-    :param all_court_info: Dict mapping video ID to court info (homography, borders).
-    :param joints_normalized_by_v_height: If True, normalize joints by video height
-        instead of bounding box diagonal.
-    :param joints_center_align: If True, center-align joints within bounding box.
+    :param detect_fn: ``detect_players_2d`` or ``detect_players_3d``.
+    :param detect_kwargs: keyword arguments threaded through to ``detect_fn``
+        besides ``video_path``.
     """
     # Flat layout: per-clip files sit alongside each other under save_root_dir.
     # Split + label come from clips_master.csv at collation time (Step 3).
@@ -559,35 +562,19 @@ def prepare_2d_dataset_npy_from_raw_video(
 
     all_mp4_paths = sorted(my_clips_folder.glob("**/*.mp4"))
 
-    pose_inferencer = MMPoseInferencer("human")
-
     pbar = tqdm(range(len(all_mp4_paths)), desc="Yield .npy files", unit="video")
     for video_path in all_mp4_paths:
         save_branch = str(save_root_dir / video_path.stem)
 
-        # Resume check: _failed.npy is saved last, so its existence means all
-        # three outputs (_pos, _joints, _failed) are complete for this clip.
-        # Shuttle data is intentionally NOT handled here — it is read from the
-        # canonical pipeline CSV dir and merged at collation (Step 3), keeping
-        # this expensive GPU step focused solely on pose estimation.
         if not Path(save_branch + "_failed.npy").exists():
-            # Players detection
-            failed_ls, players_positions, joints = detect_players_2d(
-                inferencer=pose_inferencer,
+            failed_ls, players_positions, joints = detect_fn(
                 video_path=video_path,
-                all_court_info=all_court_info,
-                res_df=resolution_df,
-                normalized_by_v_height=joints_normalized_by_v_height,
-                center_align=joints_center_align,
+                **detect_kwargs,
             )
 
             np.save(save_branch + "_pos.npy", players_positions)
-            # (F, P, xy)
             np.save(save_branch + "_joints.npy", joints)
-            # (F, P, J, xy)
             np.save(save_branch + "_failed.npy", np.array(failed_ls, dtype=bool))
-            # (F,) — True where MMPose failed to detect 2 players; saved last
-            # so its presence is a reliable resume marker for all three outputs
 
             # Free GPU memory after inference to prevent fragmentation over
             # ~33k clips. Skips don't allocate on GPU, so no cleanup needed
@@ -600,6 +587,45 @@ def prepare_2d_dataset_npy_from_raw_video(
     pbar.close()
 
 
+def prepare_2d_dataset_npy_from_raw_video(
+    my_clips_folder: Path,
+    save_root_dir: Path,
+    resolution_df: pd.DataFrame,
+    all_court_info: dict,
+    joints_normalized_by_v_height=False,
+    joints_center_align=False,
+):
+    """Run MMPose 2D pose estimation on clips and save per-clip .npy files.
+
+    For each clip, detects player keypoints (COCO 17-joint), extracts court
+    positions via homography, and normalizes joints. Saves _joints.npy
+    ((F, P, J, xy)), _pos.npy ((F, P, xy)), _failed.npy ((F,)) per clip.
+    Shuttle data is handled separately at collation time.
+
+    :param my_clips_folder: Directory containing clip .mp4 files (searched recursively).
+    :param save_root_dir: Output directory for per-clip .npy files.
+    :param resolution_df: DataFrame with video resolutions, indexed by video ID.
+    :param all_court_info: Dict mapping video ID to court info (homography, borders).
+    :param joints_normalized_by_v_height: If True, normalize joints by video height
+        instead of bounding box diagonal.
+    :param joints_center_align: If True, center-align joints within bounding box.
+    """
+    pose_inferencer = MMPoseInferencer("human")
+
+    _prepare_dataset_from_raw_video(
+        my_clips_folder=my_clips_folder,
+        save_root_dir=save_root_dir,
+        detect_fn=detect_players_2d,
+        detect_kwargs={
+            "inferencer": pose_inferencer,
+            "all_court_info": all_court_info,
+            "res_df": resolution_df,
+            "normalized_by_v_height": joints_normalized_by_v_height,
+            "center_align": joints_center_align,
+        },
+    )
+
+
 def prepare_3d_dataset_npy_from_raw_video(
     my_clips_folder: Path,
     save_root_dir: Path,
@@ -609,52 +635,28 @@ def prepare_3d_dataset_npy_from_raw_video(
     """Run MMPose 3D pose estimation on clips and save per-clip .npy files.
 
     Same as prepare_2d_dataset_npy_from_raw_video but uses 3D keypoints (xyz).
-    Shuttle data is handled separately at collation time.
+    Saves _joints.npy ((F, P, J, xyz)), _pos.npy ((F, P, xy)), _failed.npy
+    ((F,)). Shuttle data is handled separately at collation time.
 
     :param my_clips_folder: Directory containing clip .mp4 files (searched recursively).
     :param save_root_dir: Output directory for per-clip .npy files.
     :param resolution_df: DataFrame with video resolutions, indexed by video ID.
     :param all_court_info: Dict mapping video ID to court info (homography, borders).
     """
-    # Flat layout: per-clip files sit alongside each other under save_root_dir.
-    # Split + label come from clips_master.csv at collation time (Step 3).
-    save_root_dir.mkdir(parents=True, exist_ok=True)
-
-    all_mp4_paths = sorted(my_clips_folder.glob("**/*.mp4"))
-
     pose_inferencer_2d = MMPoseInferencer("human")
     # pose_inferencer_3d = MMPoseInferencer(pose3d='human3d')
 
-    pbar = tqdm(range(len(all_mp4_paths)), desc="Yield .npy files", unit="video")
-    for video_path in all_mp4_paths:
-        save_branch = str(save_root_dir / video_path.stem)
-
-        # See prepare_2d_dataset_npy_from_raw_video for resume-check rationale.
-        if not Path(save_branch + "_failed.npy").exists():
-            # Players detection
-            failed_ls, players_positions, joints = detect_players_3d(
-                inferencer_2d=pose_inferencer_2d,
-                # inferencer_3d=pose_inferencer_3d,
-                video_path=video_path,
-                all_court_info=all_court_info,
-                res_df=resolution_df,
-            )
-
-            np.save(save_branch + "_pos.npy", players_positions)
-            # (F, P, xy)
-            np.save(save_branch + "_joints.npy", joints)
-            # (F, P, J, xyz)
-            np.save(save_branch + "_failed.npy", np.array(failed_ls, dtype=bool))
-            # (F,) — True where MMPose failed to detect 2 players; saved last
-
-            # Free GPU memory after inference to prevent fragmentation over
-            # ~33k clips. Skips don't allocate on GPU, so no cleanup needed
-            # in that branch.
-            gc.collect()
-            torch.cuda.empty_cache()
-
-        pbar.update()
-    pbar.close()
+    _prepare_dataset_from_raw_video(
+        my_clips_folder=my_clips_folder,
+        save_root_dir=save_root_dir,
+        detect_fn=detect_players_3d,
+        detect_kwargs={
+            "inferencer_2d": pose_inferencer_2d,
+            # "inferencer_3d": pose_inferencer_3d,
+            "all_court_info": all_court_info,
+            "res_df": resolution_df,
+        },
+    )
 
 
 VALID_POSE_STYLES: tuple[str, ...] = ("J_only", "JnB_interp", "JnB_bone", "Jn2B")
@@ -1075,9 +1077,8 @@ def main():
 
     # Default ablation_id encodes the (taxonomy, split, drop) tuple so each
     # config writes to its own collated dir without collision.
-    ablation_id = args.ablation_id or (
-        f"{taxonomy.name}_{args.split_column}"
-        f"_{'dropunk' if args.drop_unknown else 'keepunk'}"
+    ablation_id = derive_ablation_id(
+        taxonomy.name, args.split_column, args.drop_unknown, args.ablation_id,
     )
 
     # Parse + validate --pose-styles.
@@ -1089,19 +1090,15 @@ def main():
             f"valid: {','.join(VALID_POSE_STYLES)}"
         )
 
-    # Collated dir naming (post-2026-04-21 convention):
-    #   npy_[3d_][seq{N}_]{ablation_id}
-    #     - '3d_' prefix only when use_3d_pose=True
-    #     - 'seq{N}_' prefix only when seq_len != 100 (the default)
-    #     - ablation_id = '{taxonomy}_{split_column}_{drop}'
-    # Shorter than the pre-Phase-2
-    # 'dataset_npy_collated_between_2_hits_with_max_limits_seq_100_...' prefix;
-    # the clip-windowing info that used to be in the name is still recorded
-    # in manifest.yaml:config.
-    three_d_tag = "3d_" if args.use_3d_pose else ""
-    seq_tag = "" if args.seq_len == 100 else f"seq{args.seq_len}_"
-    npy_collated_dir = preparing_root / (
-        f"npy_{three_d_tag}{seq_tag}{ablation_id}"
+    # Collated dir naming via shared helper (mirrored on the bst_train.py
+    # reader side); see ``pipeline.config.derive_npy_collated_dir_basename``.
+    npy_collated_dir = preparing_root / derive_npy_collated_dir_basename(
+        taxonomy_name=taxonomy.name,
+        split_column=args.split_column,
+        drop_unknown=args.drop_unknown,
+        use_3d_pose=args.use_3d_pose,
+        seq_len=args.seq_len,
+        ablation_id=args.ablation_id,
     )
     if args.seq_len == 30:
         default_flat_dir = preparing_root / f"dataset{str_3d}_npy_flat"

@@ -37,7 +37,12 @@ from preparing_data.shuttleset_dataset import prepare_npy_collated_loaders, \
                                               POSE_BONE_MULTIPLIER
 from model.bst import BST_0, BST_PPF, BST_CG, BST_AP, BST_CG_AP
 from result_utils import show_f1_results, plot_confusion_matrix
-from pipeline.config import TAXONOMIES, Taxonomy
+from pipeline.config import (
+    TAXONOMIES,
+    Taxonomy,
+    derive_ablation_id,
+    derive_npy_collated_dir_basename,
+)
 from run_tracker import track_run, track_serial
 
 
@@ -683,49 +688,37 @@ class Task:
 # ==========================================================================
 
 if __name__ == '__main__':
-    additional_model_info = ''
     taxonomy = TAXONOMIES[hyp.taxonomy]
 
-    # ablation_id tags the collated dir (and ends up in the manifest) so
-    # parallel ablations don't collide. Mirrors the default in
-    # preparing_data/prepare_train_on_shuttleset.py — same convention so the
-    # train script reads exactly the dir collation just wrote.
-    effective_ablation_id = hyp.ablation_id or (
-        f'{taxonomy.name}_{hyp.split_column}'
-        f'_{"dropunk" if hyp.drop_unknown else "keepunk"}'
+    # Collated dir naming via shared helper (mirrored on the prepare_train
+    # writer side); see ``pipeline.config.derive_npy_collated_dir_basename``.
+    if hyp.seq_len not in (30, 100):
+        raise NotImplementedError(f'Unsupported hyp.seq_len={hyp.seq_len!r}; expected 30 or 100.')
+    effective_ablation_id = derive_ablation_id(
+        taxonomy.name, hyp.split_column, hyp.drop_unknown, hyp.ablation_id,
+    )
+    npy_collated_dir = derive_npy_collated_dir_basename(
+        taxonomy_name=taxonomy.name,
+        split_column=hyp.split_column,
+        drop_unknown=hyp.drop_unknown,
+        use_3d_pose=hyp.use_3d_pose,
+        seq_len=hyp.seq_len,
+        ablation_id=hyp.ablation_id,
     )
 
+    # Weights filename suffix. Independent of the collated-dir name; encodes
+    # config knobs that change per run (seq_len-derived window tag, 3d flag,
+    # train_partial). Empty string is a valid value (seq_len=30, 2D, full data).
     str_3d = '_3d' if hyp.use_3d_pose else ''
-    three_d_tag = '3d_' if hyp.use_3d_pose else ''
-    # Collated dir naming (mirrors prepare_train_on_shuttleset.py main()):
-    #   npy_[3d_][seq{N}_]{ablation_id}    (prefix tags only when non-default)
-    match hyp.seq_len:
-        case 30:
-            npy_collated_dir = (
-                f'npy_{three_d_tag}seq30_{effective_ablation_id}'
-            )
-            model_info = '3d' if hyp.use_3d_pose else ''
-        case 100:
-            npy_collated_dir = (
-                f'npy_{three_d_tag}{effective_ablation_id}'
-            )
-            model_info = f'between_2_hits_with_max_limits_seq_100{str_3d}'
-        case _:
-            raise NotImplementedError
-
+    model_info_parts: list[str] = []
+    if hyp.seq_len == 100:
+        model_info_parts.append(f'between_2_hits_with_max_limits_seq_100{str_3d}')
+    elif hyp.use_3d_pose:
+        model_info_parts.append('3d')
     assert 0 < hyp.train_partial <= 1, 'hyp.train_partial should be in (0, 1].'
     if hyp.train_partial != 1:
-        tmp_str = f'train_partial_0p{str(hyp.train_partial)[2:]}'
-        if model_info != '':
-            model_info += '_' + tmp_str
-        else:
-            model_info += tmp_str
-
-    if additional_model_info != '':
-        if model_info != '':
-            model_info += f'_{additional_model_info}'
-        else:
-            model_info = additional_model_info
+        model_info_parts.append(f'train_partial_0p{str(hyp.train_partial)[2:]}')
+    model_info = '_'.join(model_info_parts)
 
     # ----------------------------------------------------------------------
     # Per-run experiment folder (tracked via run_tracker).
