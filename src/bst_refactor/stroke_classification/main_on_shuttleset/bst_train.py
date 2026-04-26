@@ -519,7 +519,7 @@ class Task:
                 val_loader=self.val_loader,
                 device=self.device,
                 save_path=weight_path,
-                n_bones=len(get_bone_pairs()) if self.pose_style != 'J_only' else 0,
+                n_bones=self.n_bones,
                 n_classes=self.taxonomy.n_classes,
                 class_ls=self.taxonomy.class_list(),
                 tb_dir=tb_dir,
