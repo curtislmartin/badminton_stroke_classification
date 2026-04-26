@@ -6,8 +6,10 @@ Three steps, each independently skippable:
   Step 2: 2D/3D player pose estimation via MMPose + court projection
   Step 3: Collate per-clip .npy files into batch-ready arrays
 
-Run from stroke_classification/:
-    python -m preparing_data.prepare_train_on_shuttleset --help
+Run from the repo root with both package roots on PYTHONPATH::
+
+    PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \\
+        python -m preparing_data.prepare_train_on_shuttleset --help
 """
 
 from mmpose.apis import MMPoseInferencer
@@ -22,17 +24,6 @@ import torch
 
 import subprocess
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
-
-import sys
-import os
-
-if __name__ == "__main__":
-    # Add stroke_classification/ for preparing_data imports (matches bst_train.py)
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    # Add project root for pipeline.config imports
-    sys.path.append(
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    )
 
 from preparing_data.shuttleset_dataset import (
     get_bone_pairs,
@@ -941,10 +932,13 @@ def collate_npy(
 def main():
     """Parse CLI arguments and run the requested pipeline steps.
 
-    Usage (from stroke_classification/ directory):
-        python -m preparing_data.prepare_train_on_shuttleset --dry-run
-        python -m preparing_data.prepare_train_on_shuttleset --skip-trajectory --skip-pose
-        python -m preparing_data.prepare_train_on_shuttleset --tracknet-dir /path/to/TrackNetV3
+    Usage (from the repo root, with both package roots on PYTHONPATH):
+        PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \\
+            python -m preparing_data.prepare_train_on_shuttleset --dry-run
+        PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \\
+            python -m preparing_data.prepare_train_on_shuttleset --skip-trajectory --skip-pose
+        PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \\
+            python -m preparing_data.prepare_train_on_shuttleset --tracknet-dir /path/to/TrackNetV3
     """
     parser = argparse.ArgumentParser(
         description=(

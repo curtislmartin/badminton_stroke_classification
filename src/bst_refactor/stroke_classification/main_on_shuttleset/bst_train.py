@@ -1,5 +1,9 @@
 # BST training script for ShuttleSet.
 #
+# Run from the repo root with both package roots on PYTHONPATH:
+#   PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \
+#       python -m main_on_shuttleset.bst_train
+#
 # PyTorch training loop overview (differs significantly from TF/Keras):
 #   TF:      model.compile(optimizer, loss) -> model.fit(data)  (one line trains everything)
 #   PyTorch: you write the loop yourself — iterate batches, compute loss, call backward(), step()
@@ -21,12 +25,7 @@ from contextlib import redirect_stdout
 import math
 import time
 from datetime import datetime, timedelta
-
 import sys
-import os
-if __name__ == '__main__':
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from preparing_data.shuttleset_dataset import prepare_npy_collated_loaders, \
                                               RandomTranslation_batch, \
@@ -39,7 +38,7 @@ from pipeline.config import (
     derive_npy_collated_dir_basename,
 )
 from run_tracker import track_run, track_serial
-from bst_common import Tee, build_bst_network, compute_data_provenance
+from main_on_shuttleset.bst_common import Tee, build_bst_network, compute_data_provenance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -659,8 +658,7 @@ if __name__ == '__main__':
     #
     # Anchor test_logs/ and experiments/ to this file's directory so the
     # write paths don't depend on cwd. Lets `python -m main_on_shuttleset.bst_train`
-    # from stroke_classification/ land outputs in the same place as a direct
-    # `python bst_train.py` from main_on_shuttleset/.
+    # land outputs next to the script regardless of where it was invoked from.
     script_dir = Path(__file__).resolve().parent
     log_dir = script_dir / 'test_logs'
     log_dir.mkdir(parents=True, exist_ok=True)

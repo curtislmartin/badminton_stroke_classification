@@ -29,6 +29,10 @@ Usage on engelbart:
   # this env var unlocks the same guarantee at the CuBLAS layer.
   export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
+  # PYTHONPATH gives access to both package roots (matches conftest.py
+  # for tests and the documented invocation pattern post-step-P).
+  export PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification
+
   # Run on pre-phase-2-tidy
   git checkout pre-phase-2-tidy
   OUT_PATH=/tmp/preds_post_tidy.npy python scratch/post_tidy_smoke/smoke_infer_bit_exact.py
@@ -56,20 +60,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# scratch/post_tidy_smoke/ -> repo root is two parents up.
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SC_ROOT = REPO_ROOT / "src" / "bst_refactor" / "stroke_classification"
-MOS_ROOT = SC_ROOT / "main_on_shuttleset"
-# Mirror the sys.path layout bst_train.py / bst_infer.py set up in their
-# __main__ blocks: main_on_shuttleset/ on path so ``from bst_common import ...``
-# resolves; stroke_classification/ for preparing_data + model imports;
-# bst_refactor/ for pipeline imports.
-sys.path.insert(0, str(MOS_ROOT))
-sys.path.insert(0, str(SC_ROOT))
-sys.path.insert(0, str(SC_ROOT.parent))
-
-from bst_infer import Task  # noqa: E402
-from pipeline.config import TAXONOMIES  # noqa: E402
+from main_on_shuttleset.bst_infer import Task
+from pipeline.config import TAXONOMIES
 
 
 def main() -> int:

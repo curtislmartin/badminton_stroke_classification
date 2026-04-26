@@ -14,11 +14,6 @@ from torch import nn, Tensor
 from positional_encodings.torch_encodings import PositionalEncoding1D
 from functools import partial  # partial(fn, arg=val) creates a new fn with some args pre-filled
 
-import sys
-import os
-if __name__ == '__main__':
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 # Building blocks defined in tempose.py:
 #   TCN                = temporal convolution network (dilated 1D convs for sequence features)
 #   MLP                = Linear -> GELU -> Dropout -> Linear

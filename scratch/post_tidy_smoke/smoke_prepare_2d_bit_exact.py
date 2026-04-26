@@ -46,6 +46,7 @@ Usage on engelbart:
   export CLIPS_DIR=/tmp/prepare_2d_smoke_clips
   export REFERENCE_DIR=$BST_MMPOSE_NPY_DIR
   export SCRATCH_DIR=/tmp/prepare_2d_smoke_outputs
+  export PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification
   python scratch/post_tidy_smoke/smoke_prepare_2d_bit_exact.py
 
   # Switch to main and run the same script against the same SCRATCH_DIR
@@ -61,11 +62,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SC_ROOT = REPO_ROOT / "src" / "bst_refactor" / "stroke_classification"
-sys.path.insert(0, str(SC_ROOT))
-sys.path.insert(0, str(SC_ROOT.parent))
 
 
 def _compare_stem(scratch_dir: Path, ref_dir: Path, stem: str, atol: float) -> tuple[bool, str]:

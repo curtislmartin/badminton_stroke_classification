@@ -18,14 +18,15 @@ Sampling is deterministic with no seeding: the 1,716 stems are sorted
 lexicographically and every ``len // sample_size``-th stem is kept. This
 spreads the sample across video IDs without introducing run-to-run noise.
 
-Run from ``stroke_classification/``::
+Run from the repo root with both package roots on PYTHONPATH::
 
-    python -m preparing_data.failsafe_bst_mmpose_zeroing_check_equivalence \\
-        --raw-dir /scratch/.../dataset_npy_..._flat_raw_phase1 \\
-        --committed-dir /scratch/.../dataset_npy_..._flat \\
-        --busted-stems-file scratch/architecture_notes/busted_hit_zone_clips_phase1.txt \\
-        --clips-csv notebooks/clips_master.csv \\
-        --scratch-output-dir /scratch/.../dataset_npy_..._flat_failsafe_gate
+    PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \\
+        python -m preparing_data.failsafe_bst_mmpose_zeroing_check_equivalence \\
+            --raw-dir /scratch/.../dataset_npy_..._flat_raw_phase1 \\
+            --committed-dir /scratch/.../dataset_npy_..._flat \\
+            --busted-stems-file scratch/architecture_notes/busted_hit_zone_clips_phase1.txt \\
+            --clips-csv notebooks/clips_master.csv \\
+            --scratch-output-dir /scratch/.../dataset_npy_..._flat_failsafe_gate
 """
 from __future__ import annotations
 
@@ -38,15 +39,7 @@ from pathlib import Path
 
 import numpy as np
 
-if __name__ == "__main__":
-    # preparing_data imports
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    # pipeline imports
-    sys.path.append(
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    )
-
-from preparing_data.apply_heuristic import run as run_apply_heuristic  # noqa: E402
+from preparing_data.apply_heuristic import run as run_apply_heuristic
 
 
 FLOAT_ATOL = 1e-5

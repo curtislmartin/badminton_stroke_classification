@@ -7,9 +7,9 @@ This is the operational plan for executing the agreed tidy actions before the X3
 
 ---
 
-## Execution status (2026-04-26 12:30)
+## Execution status (2026-04-26, post-step-P)
 
-All 12 planned commits land on `pre-phase-2-tidy` (origin tip: `25e0308`):
+All 12 planned commits + step P land on `pre-phase-2-tidy`:
 
 | # | Commit | Step |
 |---|---|---|
@@ -30,7 +30,8 @@ All 12 planned commits land on `pre-phase-2-tidy` (origin tip: `25e0308`):
 | — | `c5676dc` | Rename `n_trailing_bone_channels` → `n_bones` for consistency |
 | — | `d19664d` | Revert of `cb963d2` — production Hyp values restored |
 | — | `412f6e5` | Add `scratch/post_tidy_smoke/` bit-exact verification scripts |
-| — | `25e0308` | Smoke-script sys.path fix (workaround; see deferred refactor below) |
+| — | `25e0308` | Smoke-script sys.path fix (workaround; superseded by step P) |
+| P | (this commit) | Step P — Proper-packages refactor (see section below) |
 
 ### Remote gate (engelbart) status
 
@@ -382,11 +383,11 @@ These are explicitly **not** in scope per the review doc and your direction:
 - `pipeline/build_dataset.py:79-139` `dry_run()` consolidation.
 - `pipeline/clip_index.py` docstring trim.
 
-### Step P (proper-packages refactor — deferred follow-up)
+### Step P (proper-packages refactor — DONE)
 
-**Surfaced 2026-04-26 while wiring the bit-exact smoke scripts.**
+**Surfaced 2026-04-26 while wiring the bit-exact smoke scripts. Executed same day as a single commit on `pre-phase-2-tidy`.**
 
-The `src/bst_refactor/` tree has no `__init__.py` files anywhere, and every script that lives more than one folder deep relies on `sys.path.append(...)` calls in its `__main__` block to find sibling modules:
+Before step P, `src/bst_refactor/` had no `__init__.py` at the top three levels, and every script that lived more than one folder deep relied on a `sys.path.append(...)` block in its `__main__`:
 
 ```python
 # bst_train.py / bst_infer.py / prepare_train_on_shuttleset.py / apply_heuristic.py — same pattern in each
@@ -395,21 +396,35 @@ if __name__ == '__main__':
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 ```
 
-This is why bare imports like `from bst_common import build_bst_network` (in `bst_infer.py`) or `from preparing_data.shuttleset_dataset import ...` resolve when run as scripts but break when imported as library modules. The smoke script `smoke_infer_bit_exact.py` had to mirror the same `sys.path.insert(...)` dance to import `bst_infer` cleanly (commit `25e0308`); that workaround is acknowledged here as a monkey-patch in scratch tooling.
+That is why bare imports like `from bst_common import build_bst_network` resolved when run as scripts but broke when imported as library modules. `smoke_infer_bit_exact.py` had to mirror the same `sys.path.insert(...)` dance (`25e0308`) — acknowledged as a monkey-patch in scratch tooling.
 
-**Proposed fix:**
+**What landed:**
 
-1. Add `__init__.py` to: `src/bst_refactor/`, `src/bst_refactor/pipeline/`, `src/bst_refactor/stroke_classification/`, `.../preparing_data/`, `.../preparing_data/heuristics/`, `.../model/`, `.../main_on_shuttleset/`.
-2. Convert bare cross-dir imports to package-style: `from bst_common import ...` → `from main_on_shuttleset.bst_common import ...` (or relative `from .bst_common import ...` inside the same package).
-3. Drop the runtime `sys.path.append(...)` blocks from every `__main__`.
-4. Update the project entry points to invoke scripts via `python -m main_on_shuttleset.bst_train` etc., or set `PYTHONPATH=src/bst_refactor` once.
-5. Drop the sys.path workaround from `scratch/post_tidy_smoke/smoke_infer_bit_exact.py`.
+1. Added `__init__.py` to the three previously-missing dirs: `src/bst_refactor/`, `src/bst_refactor/stroke_classification/`, `src/bst_refactor/stroke_classification/main_on_shuttleset/`. (Four others were already present: `pipeline/`, `preparing_data/`, `preparing_data/heuristics/`, `model/`.)
+2. Converted the only bare cross-dir import: `from bst_common import ...` → `from main_on_shuttleset.bst_common import ...` in `bst_train.py`, `bst_infer.py`, and `scratch/post_tidy_smoke/smoke_infer_bit_exact.py`. All other first-party imports (`pipeline.*`, `preparing_data.*`, `model.*`, `result_utils`, `run_tracker`) were already package-style or top-level under one of the two PYTHONPATH roots.
+3. Dropped the `if __name__ == '__main__': sys.path.append(...)` blocks from `bst_train.py`, `bst_infer.py`, `model/bst.py`, `apply_heuristic.py`, `failsafe_bst_mmpose_zeroing_check_equivalence.py`, `prepare_train_on_shuttleset.py`, `raw_extract.py`.
+4. Dropped the `sys.path.insert(...)` dance from `scratch/post_tidy_smoke/smoke_infer_bit_exact.py` and `scratch/post_tidy_smoke/smoke_prepare_2d_bit_exact.py`.
+5. Updated docstrings on `bst_train.py`, `bst_infer.py`, `apply_heuristic.py`, `failsafe_*.py`, `prepare_train_on_shuttleset.py`, `raw_extract.py`, and the two smoke scripts to document the new invocation:
+   ```sh
+   PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \
+       python -m main_on_shuttleset.bst_train
+   ```
 
-**Blast radius:** ~8-12 files touched; each change is mechanical. No behavioural delta — imports resolve to the same modules. The `tests/` suite already uses package-style imports (`from src.bst_refactor.stroke_classification...`) and would not need to change. The remote gate (byte-identity, pytest, smoke train) and the bit-exact smoke scripts all rerun verbatim.
+**Why two PYTHONPATH roots and not one.** The compact-prompt direction was `from bst_common import ...` → `from main_on_shuttleset.bst_common import ...` (rooted at `stroke_classification/`, not at `bst_refactor/`). That commits us to keeping `stroke_classification/` as a PYTHONPATH root. `bst_refactor/` stays as a second root because `pipeline/`, `run_tracker.py`, `aim_backfill.py`, `run_overview.py` live there. `conftest.py` already inserts both roots for tests; the scripts now document the same pair as their PYTHONPATH.
 
-**Cost:** ~30-45 min including verification.
+**Verification (laptop, `phase_2_refactor` venv):**
 
-**Status:** Deferred until the user has signed off on the current bit-exact smoke results. Then runs as a standalone follow-up commit (or sibling branch, depending on preferred review surface) before X3D-S work begins.
+| Check | Result |
+|---|---|
+| `python -m py_compile` over all 12 modified files | ✅ OK |
+| Live import of `main_on_shuttleset.bst_common`, `main_on_shuttleset.bst_infer` | ✅ both resolve cleanly under new PYTHONPATH |
+| Live import of `apply_heuristic`, `failsafe_*`, `shuttleset_dataset`, `heuristics`, `heuristics.sticky_anchor`, `heuristics.current`, `model.bst`, `model.tempose`, `pipeline.config`, `pipeline.court_utils`, `pipeline.data_access`, `run_tracker`, `result_utils` | ✅ all resolve |
+| Live exec of `scratch/post_tidy_smoke/smoke_infer_bit_exact.py` (script body up to `main()`), checking `Task` and `TAXONOMIES` are bound | ✅ `Task` resolves to `main_on_shuttleset.bst_infer.Task`, 4 taxonomies loaded |
+| `pytest tests/` | ✅ 42 passed, 1 skipped (matches pre-step-P baseline; the 1 skip is `test_integration` without `BST_DATA_DIR`) |
+
+**Verification (engelbart, post-push):** pull, then `pytest tests/` with `BST_DATA_DIR` set (expect 43/43). Optionally re-run the failsafe byte-identity gate and `smoke_infer_bit_exact.py` for belt-and-braces; both should remain bit-exact since step P is import-only.
+
+**Net result on noqa weight:** ~22 of 30 noqa tags removed automatically (every `# noqa: E402` that sat below a sys.path block, plus several `# noqa: PLC0415` that were forced because sys.path setup needed to run first). Remaining survivors are addressed by step Q.
 
 ### Step Q (lint-debt cleanup — deferred follow-up after step P)
 

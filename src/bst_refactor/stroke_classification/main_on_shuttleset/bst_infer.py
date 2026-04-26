@@ -2,6 +2,10 @@
 # Loads a trained checkpoint and predicts stroke types.
 # Suitable as a backend for Gradio GUI — call task.infer() to get predictions.
 #
+# Run from the repo root with both package roots on PYTHONPATH:
+#   PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \
+#       python -m main_on_shuttleset.bst_infer
+#
 # See bst_train.py for detailed PyTorch/TF comparison comments.
 
 import torch
@@ -10,15 +14,9 @@ from torch.utils.data import DataLoader
 
 from pathlib import Path
 
-import sys
-import os
-if __name__ == '__main__':
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
 from preparing_data.shuttleset_dataset import Dataset_npy_collated
 from pipeline.config import TAXONOMIES, DEFAULT_TAXONOMY, Taxonomy
-from bst_common import build_bst_network
+from main_on_shuttleset.bst_common import build_bst_network
 
 
 @torch.no_grad()  # no gradient tracking needed for inference — saves memory

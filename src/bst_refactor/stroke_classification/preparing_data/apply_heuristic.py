@@ -10,13 +10,14 @@ Refuses to run if ``--output-dir`` collides with ``--raw-dir`` or with the
 ``BST_MMPOSE_NPY_DIR`` environment variable -- the committed filtered
 extract is never overwritten by this tool.
 
-Run from ``stroke_classification/``::
+Run from the repo root with both package roots on PYTHONPATH::
 
-    python -m preparing_data.apply_heuristic \\
-        --raw-dir /scratch/.../dataset_npy_..._flat_raw_phase1 \\
-        --output-dir /scratch/.../dataset_npy_..._flat_h_sticky_anchor \\
-        --heuristic sticky_anchor \\
-        --clips-csv notebooks/clips_master.csv
+    PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification \\
+        python -m preparing_data.apply_heuristic \\
+            --raw-dir /scratch/.../dataset_npy_..._flat_raw_phase1 \\
+            --output-dir /scratch/.../dataset_npy_..._flat_h_sticky_anchor \\
+            --heuristic sticky_anchor \\
+            --clips-csv notebooks/clips_master.csv
 """
 from __future__ import annotations
 
@@ -30,24 +31,16 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-if __name__ == "__main__":
-    # preparing_data imports
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    # pipeline imports
-    sys.path.append(
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    )
-
 # pipeline.data_access is imported for its side effect of auto-loading the
 # repo-root .env file, so BST_MMPOSE_NPY_DIR is visible to the collision
 # guard below without needing a prior shell export.
-import pipeline.data_access  # noqa: E402,F401
+import pipeline.data_access  # noqa: F401
 
-from pipeline.config import RESOLUTION_CSV_PATH, SET_INFO_DIR  # noqa: E402
-from pipeline.court_utils import get_court_info  # noqa: E402
+from pipeline.config import RESOLUTION_CSV_PATH, SET_INFO_DIR
+from pipeline.court_utils import get_court_info
 
-from preparing_data.heuristics import REGISTRY, ClipContext, RawClip  # noqa: E402
-from preparing_data.heuristics.sticky_anchor import StickyAnchorParams  # noqa: E402
+from preparing_data.heuristics import REGISTRY, ClipContext, RawClip
+from preparing_data.heuristics.sticky_anchor import StickyAnchorParams
 
 
 RAW_SUFFIXES = (
