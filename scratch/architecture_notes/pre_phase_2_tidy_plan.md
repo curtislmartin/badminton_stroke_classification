@@ -7,6 +7,52 @@ This is the operational plan for executing the agreed tidy actions before the X3
 
 ---
 
+## Execution status (2026-04-26 12:30)
+
+All 12 planned commits land on `pre-phase-2-tidy` (origin tip: `25e0308`):
+
+| # | Commit | Step |
+|---|---|---|
+| 1 | `db11f93` | Step 1 — Doc drift sweep |
+| 2 | `17ab5c4` | Step 2 — Historical doc skeletons + archive dirs |
+| 3 | `342a573` | Step 3 — Relocate src/-tree historical/deprecated trees |
+| 4 | `234e5b8` | Step 4 — Capture excised content into historical_bst.md |
+| 5 | `66e7c2a` | Step 5 — Drop dead BST code (~990 LOC) |
+| 6 | `bdbdaed` | Step 5b + 8 — `_prepare_dataset_from_raw_video` lift + collated-dir naming helper + model_info collapse |
+| 7 | `d6ae8df` | Step 5c — `bst_common.py` extraction |
+| 8 | `c6d962d` | Step 6 — sticky_anchor unit tests (7) |
+| 9 | `9af521e` | Step 7 — `StickyAnchorParams` dataclass collapse |
+| 10 | `ad9cd15` | Step 9 — Script archive sweep |
+| 11 | `f4c7bec` | Step 10 — `bst_train.py` configuration block tidy |
+| — | `57655aa` | Follow-up — Stop pre-existing test failures (drop unused mediapipe; auto-detect pose_style) |
+| — | `cb963d2` | TEMP smoke harness (n_epochs=2, single seed) — used for the gate |
+| — | `af1a551` | Bug fix found running the gate — single source of truth for `n_bones` |
+| — | `c5676dc` | Rename `n_trailing_bone_channels` → `n_bones` for consistency |
+| — | `d19664d` | Revert of `cb963d2` — production Hyp values restored |
+| — | `412f6e5` | Add `scratch/post_tidy_smoke/` bit-exact verification scripts |
+| — | `25e0308` | Smoke-script sys.path fix (workaround; see deferred refactor below) |
+
+### Remote gate (engelbart) status
+
+| Check | Status | Evidence |
+|---|---|---|
+| Byte-identity gate (50-clip hit-zone) | ✅ PASS | 50/50 stems exact, max abs diff 0.0 on `_pos`/`_joints` |
+| `pytest tests/` with `BST_DATA_DIR` set | ✅ PASS | 43/43 (after `57655aa` fixed pre-existing env mismatches) |
+| 2-epoch smoke train comparison | ✅ PASS | `run_20260426_115321` (post-tidy) vs `run_20260426_120039` (main); curves within run-to-run noise; manifest `config:` and `data_provenance.npy_collated_dir` byte-identical |
+| `bst_infer` bit-exact (smoke_infer_bit_exact.py) | ⏳ PENDING | smoke script just unblocked by `25e0308`; user is rerunning |
+| `prepare_2d` bit-exact (smoke_prepare_2d_bit_exact.py) | ⚪ OPTIONAL | mechanical lift; behaviourally identical by construction; only worth running for belt-and-braces coverage |
+
+### Branch destination
+
+Decision still pending. Options on the table:
+1. Open a PR for team review, then merge to main.
+2. Merge to main directly once both pending checks tick off.
+3. Sit on the branch as the working trunk; X3D-S work branches off this.
+
+---
+
+---
+
 ## Branch destination
 
 **Decision:** sit on the `pre-phase-2-tidy` branch after local tests pass. After remote tests pass, the user will decide. No push, no PR, no merge to main without explicit go-ahead.
@@ -335,6 +381,35 @@ These are explicitly **not** in scope per the review doc and your direction:
 - `aim_backfill._derive_tags` parameterisation.
 - `pipeline/build_dataset.py:79-139` `dry_run()` consolidation.
 - `pipeline/clip_index.py` docstring trim.
+
+### Step P (proper-packages refactor — deferred follow-up)
+
+**Surfaced 2026-04-26 while wiring the bit-exact smoke scripts.**
+
+The `src/bst_refactor/` tree has no `__init__.py` files anywhere, and every script that lives more than one folder deep relies on `sys.path.append(...)` calls in its `__main__` block to find sibling modules:
+
+```python
+# bst_train.py / bst_infer.py / prepare_train_on_shuttleset.py / apply_heuristic.py — same pattern in each
+if __name__ == '__main__':
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+```
+
+This is why bare imports like `from bst_common import build_bst_network` (in `bst_infer.py`) or `from preparing_data.shuttleset_dataset import ...` resolve when run as scripts but break when imported as library modules. The smoke script `smoke_infer_bit_exact.py` had to mirror the same `sys.path.insert(...)` dance to import `bst_infer` cleanly (commit `25e0308`); that workaround is acknowledged here as a monkey-patch in scratch tooling.
+
+**Proposed fix:**
+
+1. Add `__init__.py` to: `src/bst_refactor/`, `src/bst_refactor/pipeline/`, `src/bst_refactor/stroke_classification/`, `.../preparing_data/`, `.../preparing_data/heuristics/`, `.../model/`, `.../main_on_shuttleset/`.
+2. Convert bare cross-dir imports to package-style: `from bst_common import ...` → `from main_on_shuttleset.bst_common import ...` (or relative `from .bst_common import ...` inside the same package).
+3. Drop the runtime `sys.path.append(...)` blocks from every `__main__`.
+4. Update the project entry points to invoke scripts via `python -m main_on_shuttleset.bst_train` etc., or set `PYTHONPATH=src/bst_refactor` once.
+5. Drop the sys.path workaround from `scratch/post_tidy_smoke/smoke_infer_bit_exact.py`.
+
+**Blast radius:** ~8-12 files touched; each change is mechanical. No behavioural delta — imports resolve to the same modules. The `tests/` suite already uses package-style imports (`from src.bst_refactor.stroke_classification...`) and would not need to change. The remote gate (byte-identity, pytest, smoke train) and the bit-exact smoke scripts all rerun verbatim.
+
+**Cost:** ~30-45 min including verification.
+
+**Status:** Deferred until the user has signed off on the current bit-exact smoke results. Then runs as a standalone follow-up commit (or sibling branch, depending on preferred review surface) before X3D-S work begins.
 
 ---
 
