@@ -61,8 +61,8 @@ Hyp = namedtuple('Hyp', [
     'clips_csv', 'split_column', 'drop_unknown', 'ablation_id',
 ])
 hyp = Hyp(
-    n_epochs=80,
-    early_stop_n_epochs=40,
+    n_epochs=2,                # SMOKE-HARNESS: was 80; revert before any production run.
+    early_stop_n_epochs=999,   # SMOKE-HARNESS: was 40; revert before any production run.
     batch_size=128,
     lr=5e-4,
     warm_up_step=100,
@@ -680,7 +680,7 @@ if __name__ == '__main__':
 
     with open(log_path, 'w') as log_f:
         tee = Tee(sys.stdout, log_f)
-        for serial_no in range(1, 6):
+        for serial_no in range(1, 2):  # SMOKE-HARNESS: was range(1, 6); revert before any production run.
             print(f'Running serial {serial_no} ...')
             task = Task(n_joints=17, taxonomy=taxonomy, weight_dir=weight_dir)
             task.prepare_dataloaders(
