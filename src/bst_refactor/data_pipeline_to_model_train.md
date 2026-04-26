@@ -145,7 +145,7 @@ On engelbart, the taxonomy output directory lives on scratch. The script auto-cr
 ```bash
 # On engelbart (replace taxonomy name as needed):
 mkdir -p /scratch/comp320a/ShuttleSet_data_une_merge_v1
-cd ~/badminton_stroke_classifier/src/bst_refactor/stroke_classification/preparing_data
+cd ~/badminton_stroke_classification/src/bst_refactor/stroke_classification/preparing_data
 ln -s /scratch/comp320a/ShuttleSet_data_une_merge_v1 ShuttleSet_data_une_merge_v1
 ```
 

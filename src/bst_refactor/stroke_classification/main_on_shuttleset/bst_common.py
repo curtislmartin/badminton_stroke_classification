@@ -9,7 +9,6 @@ network builder, and the data-provenance manifest helper only.
 import hashlib
 from pathlib import Path
 
-import torch
 from torch import nn
 
 from preparing_data.shuttleset_dataset import POSE_BONE_MULTIPLIER, get_bone_pairs

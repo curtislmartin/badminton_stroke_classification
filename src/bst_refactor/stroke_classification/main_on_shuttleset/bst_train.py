@@ -12,7 +12,6 @@
 import torch
 from torch import Tensor, nn, optim  # nn = layers/models, optim = optimizers (like tf.keras.optimizers)
 import torch.nn.functional as F      # F = stateless functions (one_hot, softmax, etc.)
-from torch.utils.data import DataLoader  # like tf.data.Dataset — batches, shuffles, prefetches
 from torch.utils.tensorboard import SummaryWriter  # TensorBoard logging (same viewer as TF)
 from torcheval.metrics.functional import multiclass_f1_score
 
