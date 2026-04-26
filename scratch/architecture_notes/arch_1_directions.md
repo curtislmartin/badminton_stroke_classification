@@ -94,6 +94,10 @@ Practical notes: gamma=1.5 is the conservative starting point (Lin et al. used 2
 
 If focal lifts the wrist_smash floor, data augmentation is the natural intermediate step before X3D-S. If it doesn't, jump to X3D-S directly. X3D-S is the principled long-term solution either way, since it adds racket-pixel information that pose-only can't see.
 
+## Current LR + aux schedule
+
+Active settings (`bst_train.py:140-157` plus the cosine call at `:395-400`): `n_epochs=80`, `early_stop_n_epochs=40`, `batch_size=128`, `lr=5e-4`, `warm_up_step=100`, `num_cycles=0.5`, `use_aux_schedule=True`, `aux_fade_end_epoch=15`. Compressed warm-start-then-finetune schedule paired with the CG/AP cosine fade: ~4 epochs warmup, ~15 epochs of CG/AP warm-start tapering to 0, then ~65 epochs of pure-backbone training under cooling LR. The BST paper's defaults (`n_epochs=1600`, `warm_up_step=400`, `early_stop_n_epochs=300`, `num_cycles=0.25`, `aux_fade_end_epoch=60`) and the dated retune rationale are captured in `scratch/architecture_notes/historical_bst.md` section 3 for reproduction work.
+
 ## Completed experiments
 
 ### LR schedule retune (Q4) — 2026-04-17
