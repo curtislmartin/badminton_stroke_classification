@@ -73,6 +73,12 @@ config:
   lr: 0.0005
   use_aux_schedule: false
   ...
+extra:
+  data_provenance:
+    clips_csv_path: /path/to/clips_master.csv
+    clips_csv_sha256: 4b6f...
+    effective_ablation_id: une_merge_v1_nosides_split_v2_dropunk_h_sticky_anchor
+    npy_collated_dir: npy_une_merge_v1_nosides_split_v2_dropunk_h_sticky_anchor
 serials:
   - serial_no: 1
     weights_path: experiments/run_.../weights/bst_CG_AP_..._1.pt

@@ -162,7 +162,7 @@ python -m pipeline.build_dataset [OPTIONS]
 --skip-verify          Skip verification checks (step 5)
 --skip-shuttle         Skip TrackNetV3 shuttle extraction
 --no-merge             Keep all 19 stroke types (skip class merging)
---taxonomy NAME        Stroke type taxonomy: 'une_merge_v1' (default), 'merged_25', or 'raw_35'
+--taxonomy NAME        Stroke type taxonomy: 'une_merge_v1' (default), 'une_merge_v1_nosides', 'merged_25', or 'raw_35'
 --dry-run              Preview what the pipeline would do without executing
 --force                Continue past verification failures
 ```
@@ -244,7 +244,7 @@ All configuration lives in `pipeline/config.py`. Key constants:
 
 | Constant | Description |
 |---|---|
-| `TAXONOMIES` | Dict of named `Taxonomy` instances (`'une_merge_v1'`, `'merged_25'`, `'raw_35'`). Each taxonomy defines `merge_map`, `base_types`, `n_classes`, and `class_list()`. |
+| `TAXONOMIES` | Dict of named `Taxonomy` instances (`'une_merge_v1'`, `'une_merge_v1_nosides'`, `'merged_25'`, `'raw_35'`). Each taxonomy defines `merge_map`, `base_types`, `n_classes`, and `class_list()`. |
 | `DEFAULT_TAXONOMY` | Name of the default taxonomy (`'une_merge_v1'`). Used by all CLI defaults and fallback code paths. |
 | `UNPREFIXED_TYPES` | Frozenset of raw types that never get `Top_`/`Bottom_` prefixed folders (`{'unknown', 'driven_flight'}`). Used only by clip generation. |
 | `SPLITS` | Train/val/test video ID lists (excluded videos auto-stripped) |

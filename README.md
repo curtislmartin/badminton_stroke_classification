@@ -72,9 +72,13 @@ There's also a partial MLflow setup in `scripts/example_mlflow_run.py` if someon
 
 ## Verify Environment
 
-The project includes a base environment test:
+The project's pytest suite covers environment, data access, dataset, API, and an integration smoke (auto-skipped without `BST_DATA_DIR`):
 
 - `tests/test_environment.py`
+- `tests/test_data_access.py`
+- `tests/test_dataset.py`
+- `tests/test_api.py`
+- `tests/test_integration.py`
 
 Optional manual checks:
 
