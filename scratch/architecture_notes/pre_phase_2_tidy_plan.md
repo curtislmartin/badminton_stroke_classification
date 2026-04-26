@@ -1,9 +1,155 @@
-# Pre-Phase-2 Tidy Execution Plan
+# Pre-Phase-2 Tidy: refactor record + reviewer brief
 
-**Date:** 2026-04-26
-**Source:** `pre_phase_2_review_2026-04-26.md` plus user feedback in this session.
+**Branch:** `pre-phase-2-tidy` (origin tip: `88ee24e` at time of writing).
+**Cut from:** `main` at `d4fd644` ("Ablation collapsing top/bottom classes…").
+**Diff vs main:** 28 commits, 68 files changed, +3,425 / −1,497 LOC.
+**Source-and-test diff vs main:** 29 .py files, +447 / −6,673 LOC (most of the deletions are dead-code excision that landed in step 5; new code is small).
+**Date of latest revision:** 2026-04-26.
 
-This is the operational plan for executing the agreed tidy actions before the X3D-S layer lands. Commit-by-commit, each step gated by automated local safety checks. The big remote-enabled batch (engelbart V100, real data) is run by you at the end; nothing in this plan needs HPC access.
+---
+
+## 0. Reviewer brief — READ THIS FIRST
+
+You are one of a parallel team of agents brought in to give this branch a final, memory-isolated review before merge. The user (Ariel) and the in-session author have already done substantial internal verification (see §2 below); this review is the independent check that a fresh reader would catch what we missed.
+
+### Why this review exists
+
+`main` was a known-working tip. The refactor is large (28 commits, 6.7k LOC removed). Pytest + bit-exact gates passed, but pytest does not exercise the full training loop, the MMPose runtime, or the shuttle pipeline. The user wants belt-and-braces confidence that no behavioural regression slipped through, *and* a clear-eyed audit of whether the refactor met its original goals before the next phase begins.
+
+### Your role (one of three threads)
+
+The coordinating agent will assign you exactly one of these. Do only your assigned role.
+
+1. **REGRESSION_HUNTER** — walk the `main..pre-phase-2-tidy` diff and surface any place a behavioural regression could have crept in. Scope priorities: (a) anywhere a function body changed, not just moved; (b) anywhere a same-named symbol was deleted from one file and added to another (lift); (c) anywhere a default argument, exception type, or import order changed; (d) anywhere a "no-op refactor" claim cannot be verified from the diff alone. Pytest already covers the public dataset/loader/BST_0 forward path on real data when `BST_DATA_DIR` is set; you do not need to re-run it.
+2. **GOALS_AUDITOR** — read `scratch/architecture_notes/pre_phase_2_review_2026-04-26.md` (the original review that motivated this branch) and map each of its six focus areas against what landed. For each focus area: did the refactor address it? Partially? Not at all? Was the chosen approach the right one in retrospect? Then read §3 below ("Open items going into the next phase") and assess whether anything on it should actually move *before* merge.
+3. **DOC_COVERAGE_AUDITOR** — sanity-check the doc/test surface. Is anything claimed in the docs (this plan doc included) contradicted by the code? Are there changes in the diff that are not reflected anywhere user-facing? Are the verification gates listed in §2 below sufficient — or is there a meaningful surface they don't cover that a small additional test would close cheaply?
+
+### Operating constraints (all roles)
+
+- **Read-only.** Do not edit code, do not commit, do not run training jobs. You may run pytest if helpful; you may run `git log`, `git diff`, `grep`, and read any file.
+- **File:line citations on every claim.** "There's a bug somewhere in `bst_train`" is not actionable; "`bst_train.py:312` the loss tensor is moved off-device before backward, see diff" is.
+- **Forced verdicts, no fence-sitting.** Every finding gets one of:
+  - `REGRESSION_RISK` (with severity: BLOCKER / SHOULD_FIX / NICE_TO_FIX) — for REGRESSION_HUNTER and DOC_COVERAGE_AUDITOR.
+  - `GOAL_MET` / `GOAL_PARTIAL` / `GOAL_MISSED` — for GOALS_AUDITOR.
+  - `BEFORE_MERGE` / `BEFORE_PHASE_2` / `DEFER` — for any action you propose.
+- **No new abstractions.** If you'd recommend a new helper or class, say "would be nice in phase 2" rather than "must add now". The branch is closed for refactor scope; we want known-working merged.
+- **No memory of prior conversations.** You do not have access to the user's chat history with the in-session author; you have what's in this repo. Treat anything not in the repo as not existing.
+
+### Required reading before you start
+
+1. The rest of this document (sections 1-3, plus the appendix per-step plan if you need granularity).
+2. `scratch/architecture_notes/pre_phase_2_review_2026-04-26.md` — the original review whose six focus areas drove this branch.
+3. `git log main..pre-phase-2-tidy --stat` for commit-level scope; `git diff main..pre-phase-2-tidy -- <file>` for any file you want to inspect closely.
+4. `.claude/project_overview.md` for project context (taxonomies, splits, hardware, team).
+
+### Output format
+
+A single markdown document with:
+
+```
+# <ROLE> review — pre-phase-2-tidy
+
+## Summary
+- One paragraph: confidence level, top concern, top achievement.
+
+## Findings
+### Finding 1: <one-line title>
+- Verdict: <one of the labels above>
+- Evidence: <file:line refs, short snippets if helpful>
+- Suggested action: <one sentence + the priority label>
+
+### Finding 2: ...
+
+(...)
+
+## Verdict on the merge question
+One of:
+- READY_TO_MERGE — no blockers, optional follow-ups listed.
+- BLOCKERS_TO_RESOLVE — N specific items below must close first.
+- CANNOT_DETERMINE_WITHOUT — list the artefacts/runs needed to decide.
+```
+
+Keep it terse. Triple-bullet evidence per finding is plenty; do not narrate.
+
+---
+
+## 1. What landed (refactor summary)
+
+Steps 1–10 (planned) + step P (proper-packages refactor) + step Q (lint-debt cleanup) all landed on `pre-phase-2-tidy`. The detailed per-step plan is preserved verbatim in the appendix; this section is a one-line-per-step recap for the reviewer.
+
+| # | Commit | One-line summary |
+|---|---|---|
+| 1 | `db11f93` | Doc drift sweep: refresh Hyp defaults, taxonomy lists, heuristics description, manifest example, line cites. |
+| 2 | `17ab5c4` | Add `historical_bst.md` skeleton + `scratch/project_history/` + `scripts/archive/` directories. |
+| 3 | `342a573` | `git mv` `src/bst_refactor/deprecated/`, `ShuttleSet/deprecated/`, `main_on_shuttleset/tmp/` into `scratch/project_history/`. |
+| 4 | `234e5b8` | Capture `TemPose_*`, original `Hyp` defaults, LR/aux rationale, removed dataset classes, `compare_pred_gt_on_specific_type` verbatim into `historical_bst.md`. |
+| 5 | `66e7c2a` | Drop dead BST code (~990 LOC): four `TemPose_*` variants, three orphan dataset classes + their loaders, debug helper. No callers anywhere. |
+| 5b/8 | `bdbdaed` | Lift shared per-clip iteration into `_prepare_dataset_from_raw_video`; lift collated-dir naming into `pipeline.config.derive_npy_collated_dir_basename`; collapse the `bst_train` model_info builder. |
+| 5c | `d6ae8df` | Extract `bst_common.py` (`MODELS`, `Tee`, `build_bst_network`, `compute_data_provenance`); `bst_train` and `bst_infer` now share one source of truth. |
+| 6 | `c6d962d` | Add 7 `tests/test_sticky_anchor.py` invariant tests (Voronoi, Bottom-first, sitting tiebreaker, rally presence, EMA reset, mixed pick, update gate). |
+| 7 | `9af521e` | `StickyAnchorParams` frozen dataclass: collapse three triplicated default-value definitions into one. |
+| 9 | `ad9cd15` | `git mv` completed-phase scripts into `scripts/archive/`; flag `scripts/example_mlflow_run.py` as a delivery-review TODO. |
+| 10 | `f4c7bec` | Move LR/aux rationale paragraphs out of `bst_train.py` into `arch_1_directions.md` + `historical_bst.md`. |
+| — | `57655aa` | Pre-existing test-failure fix: drop unused `mediapipe` import; auto-detect `pose_style` in `test_integration`. |
+| — | `af1a551`, `c5676dc` | Found running the gate: consolidate `n_bones` as a single source of truth in `build_bst_network`; rename for consistency. |
+| — | `412f6e5`, `25e0308`, `248f540` | `scratch/post_tidy_smoke/` bit-exact verification scripts (later superseded by step P). |
+| P | `fd12cd8` | Proper-packages refactor: 3 new `__init__.py`, 7 `sys.path.append` blocks dropped, 3 imports converted to package-style. New invocation: `PYTHONPATH=src/bst_refactor:src/bst_refactor/stroke_classification python -m main_on_shuttleset.bst_train`. |
+| Q | `c29e97c` | Lint-debt cleanup: explicit `load_repo_dotenv()`, narrowed two `BLE001` excepts, lifted two PLC0415 imports to module top, kept two with justifying comments. |
+| docs | `e9a1c7d`, `ee664e5`, `7daa319`, `04f0ecb`, `4e5cb3a`, `e811ffa`, `88ee24e` | Plan-doc updates and a two-pass post-refactor doc-drift sweep across user-facing markdown. |
+
+Net: −6,673 LOC of source/tests deleted, +447 LOC of source/tests added (mostly `tests/test_sticky_anchor.py` and `bst_common.py`). Roughly −5,500 LOC of historical content + scripts moved into `scratch/project_history/` and `scripts/archive/`.
+
+---
+
+## 2. Verification that passed (in-session)
+
+| Check | Where | Result |
+|---|---|---|
+| Byte-identity heuristic gate (50-clip hit-zone sample) | engelbart V100 | ✅ 50/50 stems exact, max abs diff 0.0 |
+| `pytest tests/` with `BST_DATA_DIR` set | engelbart, post-step-P and post-step-Q | ✅ 43/43 (pytest wall-time dropped ~11s → ~9s after step P) |
+| 2-epoch smoke train, post-tidy vs main | engelbart, runs `run_20260426_115321` vs `run_20260426_120039` | ✅ within run-to-run noise; `manifest.config:` and `data_provenance.npy_collated_dir` byte-identical |
+| `bst_infer` bit-exact (smoke_infer_bit_exact.py) | engelbart with `CUBLAS_WORKSPACE_CONFIG=:4096:8` | ✅ 4202/4202 predictions IDENTICAL between post-tidy and main |
+| `prepare_2d` bit-exact (line-level diff review) | local | ✅ structural-only refactor; per-line diff confirms no behavioural delta possible |
+| `pytest tests/` (laptop, no `BST_DATA_DIR`) | post-step-P, post-step-Q | ✅ 42 passed, 1 skipped |
+| `ruff check` over step-Q-touched files | local | ✅ all checks passed |
+
+What pytest does NOT cover: full multi-epoch training loop, MMPose runtime path (depends on the mmpose stack not installed locally), TrackNetV3 shuttle extraction, the Aim UI integration, the heuristic dispatch on real raw extracts (only the byte-identity gate exercises that, and only once). Reviewers should consider whether any of those gaps matter for the merge decision.
+
+---
+
+## 3. Open items going into the next phase
+
+These were explicitly deferred during the refactor. The reviewer (especially GOALS_AUDITOR) should assess whether any of them should actually move *before* merge.
+
+- **Branch destination decision.** Three options on the table: open a PR for team review then merge; merge directly; sit on the branch as the working trunk and let X3D-S work branch off this. No push to main, no PR, no merge to main without explicit user go-ahead.
+- **Path/IO abstraction** (focus area 5 in the original review). Reserved for after-X3D-S.
+- **`prepare_train_on_shuttleset.py` full module split** into `mmpose_extract.py` + `homography.py` + `collate.py`. Light tidy landed in step 5b; the structural split is reserved for after X3D-S.
+- **Validation script triplet shared core** (focus area 6, site 5).
+- **Bulk style passes:** AU/UK rename for `normalize_*` and "labeled"/"vectorized"; em-dash sweep; "fade" → "anneal"/"downtune".
+- **`aim_backfill._derive_tags` parameterisation.**
+- **`pipeline/build_dataset.py:79-139` `dry_run()` consolidation.**
+- **`pipeline/clip_index.py` docstring trim.**
+- **`scripts/example_mlflow_run.py`** stays in place with a delivery-review TODO; gets deleted before delivery if Scott has not picked up MLflow.
+
+---
+
+## 4. Wire-in invariant for X3D-S (still load-bearing)
+
+The X3D-S wrist-crop layer (Architecture 1, phase 4 of the build plan) wires into the BST model internals at five points. These were read-only across this entire branch and remain so:
+
+- `bst.py:106-110` `CrossTransformerLayer` signature and attention plumbing.
+- `bst.py` `BST_CG_AP` forward graph: token sequencing, positional embeddings, `d_model=100`/`d_head=128`/`n_head=6` defaults, per-stream embedding heads (pose, shuttle, position).
+- `bst.py:28` building-block imports (`TCN`, `MLP`, `MLP_Head`, `FeedForward`, `TransformerEncoder`).
+- `bst.py:433-437` the five `BST_*` partials.
+- No new abstraction layer between `bst.py` and the train loop. `bst_common.py` lifts `MODELS` / `build_bst_network` / `Tee` / `compute_data_provenance` only; direct `MODELS[...](**kw)` instantiation stays.
+
+If a reviewer flags any of those five points as having drifted, that is a BLOCKER finding regardless of pytest status.
+
+---
+
+## Appendix — original execution plan (kept verbatim as a record)
+
+Everything below this line is the original step-by-step plan as it stood when the refactor was executed. Read it for granularity on what each step touched, the safety checks each step ran, and the rationale for in-flight decisions. Section 1 above is the recap; this is the source.
 
 ---
 
