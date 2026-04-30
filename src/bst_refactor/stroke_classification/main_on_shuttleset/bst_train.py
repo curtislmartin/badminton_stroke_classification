@@ -57,7 +57,7 @@ Hyp = namedtuple('Hyp', [
     'pose_style', 'use_3d_pose', 'train_partial',
     'use_aux_schedule', 'aux_fade_end_epoch',
     'clips_csv', 'split_column', 'drop_unknown', 'ablation_id',
-    'label_smoothing',
+    'label_smoothing', 'class_weights',
 ])
 hyp = Hyp(
     n_epochs=80,
@@ -76,7 +76,13 @@ hyp = Hyp(
     split_column='split_v2',
     drop_unknown=True,
     ablation_id=None,
-    label_smoothing=0.0,  # LS sweep: BST paper default 0.1; testing 0.0 first
+    label_smoothing=0.15,  # LS sweep cell 2: LS=0.0 underperformed LS=0.1 on combo A nosides; pushing past paper default to test more-smoothing direction
+    # Manual per-class CE weights for the wrist_smash <-> smash confusion-pair smoke test.
+    # Pair-balanced (both at 2.0) so the gradient has no directional bias toward one class:
+    # tests whether loss-side reweighting alone can move the wrist_smash F1 floor without
+    # stealing recall from smash. Weights renormalised to mean 1.0 inside the loss build so
+    # overall loss scale stays comparable to uniform CE. Set to None for uniform CE.
+    class_weights={'wrist_smash': 2.0, 'smash': 2.0},
 )
 
 
@@ -303,7 +309,28 @@ def train_network(
     # whether it's bottlenecking the small-support classes that lose
     # ground when the cleaner Phase-2 pose data lifts the head of the
     # F1 distribution. See scratch/architecture_notes/hparams_sweep_speculations.md.
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=hyp.label_smoothing)
+    #
+    # class_weights: optional manual per-class loss multipliers. Used as a
+    # smoke test for whether loss-side reweighting can move the bottleneck
+    # F1 classes (wrist_smash + its confusion partner smash). Renormalised to
+    # mean 1.0 so the overall loss magnitude stays comparable to uniform CE
+    # (keeps LR / grad-clip behaviour aligned across cells). None = uniform.
+    if hyp.class_weights:
+        weights = torch.ones(n_classes, device=device)
+        for cls_name, multiplier in hyp.class_weights.items():
+            if cls_name not in class_ls:
+                raise ValueError(
+                    f"class_weights key '{cls_name}' not in taxonomy "
+                    f"{hyp.taxonomy} (classes: {class_ls})"
+                )
+            weights[class_ls.index(cls_name)] = multiplier
+        weights = weights * (n_classes / weights.sum())  # renormalise mean to 1.0
+        print(f"[loss] class-weighted CE (renormalised, mean=1.0):")
+        for i, c in enumerate(class_ls):
+            print(f"    {c:25s} weight={weights[i].item():.3f}")
+        loss_fn = nn.CrossEntropyLoss(weight=weights, label_smoothing=hyp.label_smoothing)
+    else:
+        loss_fn = nn.CrossEntropyLoss(label_smoothing=hyp.label_smoothing)
     # AdamW = Adam with decoupled weight decay (standard for transformers)
     # model.parameters() returns all learnable weights (TF equivalent: model.trainable_variables)
     optimizer = optim.AdamW(model.parameters(), lr=hyp.lr)
@@ -406,10 +433,23 @@ def train_network(
             print(f'Early stop with best value {best_macro:.3f}')
             break
 
+    # Save best checkpoint and restore it into the model. Done before TB
+    # hparam logging so a logging failure doesn't lose the trained weights.
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(best_state, str(save_path))  # like model.save_weights() in TF
+    model.load_state_dict(best_state)       # like model.load_weights() in TF
+
     # HParams summary: one row per run, sortable in TB's HParams tab.
     # stopped_epoch - best_macro_epoch == early_stop_n_epochs confirms clean early-stop.
+    # Coerce non-scalar values (dicts, None, etc.) to strings; TB's add_hparams
+    # only accepts int / float / str / bool / Tensor.
+    def _to_hparam_value(value):
+        if isinstance(value, (int, float, str, bool)) or torch.is_tensor(value):
+            return value
+        return str(value)
+
     writer.add_hparams(
-        hparam_dict=hyp._asdict(),
+        hparam_dict={k: _to_hparam_value(v) for k, v in hyp._asdict().items()},
         metric_dict={
             'best/macro_f1':        best_macro,
             'best/macro_f1_epoch':  best_macro_epoch,
@@ -428,10 +468,6 @@ def train_network(
     )
     writer.close()
 
-    # Save best checkpoint and restore it into the model
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(best_state, str(save_path))  # like model.save_weights() in TF
-    model.load_state_dict(best_state)       # like model.load_weights() in TF
     return model
 
 

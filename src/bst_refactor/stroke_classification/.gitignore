@@ -53,3 +53,9 @@ main_on_shuttleset/.aim/
 
 # run_20260430_170325: Phase 2 sanity train, combo A (une_merge_v1_nosides + split_v2 + dropunk), 80ep. S4 best (top macro 0.747, acc 0.770, top-2 0.940, min 0.403). Collapse-rescue confirmed on Phase-2 data: +0.058 min vs combo B; essentially tied with Phase-1 collapsed-classes baseline.
 !main_on_shuttleset/experiments/run_20260430_170325/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides_4.pt
+
+# run_20260430_213933: Phase 2 LS sweep cell 1, combo A nosides + LS=0.0, 80ep. S2 best (top min 0.404). Hypothesis (LS=0.0 lifts wrist_smash) not supported: vs LS=0.1 baseline run_20260430_170325, head metrics flat, mean wrist_smash -1.6 pp, best-of-run wrist_smash -5.5 pp.
+!main_on_shuttleset/experiments/run_20260430_213933/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides_2.pt
+
+# run_20260501_073430: Phase 2 LS sweep cell 2, combo A nosides + LS=0.15, 80ep. S3 best (top macro 0.753, top min 0.448, top acc 0.773). Vs LS=0.1 baseline run_20260430_170325, head metrics flat (+0.005 macro mean), mean wrist_smash +4.2 pp, range tightens 0.159 -> 0.066.
+!main_on_shuttleset/experiments/run_20260501_073430/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides_3.pt
