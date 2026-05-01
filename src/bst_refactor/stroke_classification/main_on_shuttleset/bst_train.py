@@ -45,6 +45,11 @@ from main_on_shuttleset.bst_common import (
     compute_data_provenance,
     derive_active_classes_from_labels,
 )
+from main_on_shuttleset.loss.adaptive_focal import (
+    AdaptiveFocalLoss,
+    accumulate_class_counts,
+    per_class_f1_from_counts,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -64,7 +69,7 @@ Hyp = namedtuple('Hyp', [
     'pose_style', 'use_3d_pose', 'train_partial',
     'use_aux_schedule', 'aux_fade_end_epoch',
     'clips_csv', 'split_column', 'drop_unknown', 'ablation_id',
-    'label_smoothing', 'class_weights',
+    'label_smoothing', 'class_weights', 'adaptive_focal',
     'expected_active_classes',
 ])
 hyp = Hyp(
@@ -84,13 +89,28 @@ hyp = Hyp(
     split_column='split_v2',
     drop_unknown=True,
     ablation_id=None,
-    label_smoothing=0.15,  # LS sweep cell 2: LS=0.0 underperformed LS=0.1 on combo A nosides; pushing past paper default to test more-smoothing direction
+    label_smoothing=0.0,  # CDB-F1 cell forces LS=0; LS softens targets so confident-correct samples have p_t < 1.0, contaminating focal's per-sample hardness signal
     # Manual per-class CE weights for the wrist_smash <-> smash confusion-pair smoke test.
     # Pair-balanced (both at 2.0) so the gradient has no directional bias toward one class:
     # tests whether loss-side reweighting alone can move the wrist_smash F1 floor without
     # stealing recall from smash. Weights renormalised to mean 1.0 inside the loss build so
     # overall loss scale stays comparable to uniform CE. Set to None for uniform CE.
-    class_weights={'wrist_smash': 2.0, 'smash': 2.0},
+    class_weights=None,
+    # Class-F1-driven adaptive focal loss (CDB-F1). Mutually exclusive with
+    # class_weights, and forces label_smoothing=0 (LS contaminates focal's
+    # hardness estimate). None disables; pass a dict to engage:
+    #   adaptive_focal={
+    #       'tau': 1.0, 'gamma': 1.0, 'momentum': 0.9,
+    #       'warm_up_epochs': 5, 'f1_floor': 0.0,
+    #   }
+    # Full design + paper-verified equations: scratch/architecture_notes/class_f1_focal_design.md.
+    adaptive_focal={
+        'tau': 1.0,
+        'gamma': 0.0,  # gamma=0 cell: drop the per-sample focal layer; tests the doubly-suppression / noise-amplification hypotheses
+        'momentum': 0.9,
+        'warm_up_epochs': 5,
+        'f1_floor': 0.0,
+    },
     # Optional belt-and-braces lever: when non-None, the empirical active class list
     # derived from train labels gets asserted equal to this. Mismatch raises with
     # both lists side-by-side. Default None means "trust the data".
@@ -130,13 +150,27 @@ def train_one_epoch(
     loader,
     random_shift_fn,
     n_bones: int,
+    n_classes: int,
     loss_fn,
     optimizer: optim.Optimizer,
     scheduler: optim.lr_scheduler.LambdaLR,  # learning rate scheduler
-    device
-):
+    device,
+) -> tuple[float, Tensor, Tensor, Tensor]:
+    """Train for one epoch, accumulating per-class TP / FP / FN alongside loss.
+
+    Per-class counts feed ``AdaptiveFocalLoss.update_alpha`` at the call site.
+    They're cheap (three batched ``bincount`` calls per batch) and stay
+    accumulated even when the loss has no use for them, so the train loop
+    keeps a uniform return signature regardless of which loss is active.
+
+    :return: ``(train_loss, tp, fp, fn)``; counts are length-``n_classes``
+        int64 tensors on ``device``.
+    """
     model.train()  # enable dropout + batchnorm training mode (TF: training=True)
     total_loss = 0.0
+    tp = torch.zeros(n_classes, dtype=torch.long, device=device)
+    fp = torch.zeros(n_classes, dtype=torch.long, device=device)
+    fn = torch.zeros(n_classes, dtype=torch.long, device=device)
 
     for (human_pose, pos, shuttle), video_len, labels in loader:
         # .to(device) = move tensors to GPU/CPU. TF does this automatically;
@@ -171,8 +205,19 @@ def train_one_epoch(
 
         total_loss += loss.item()  # .item() extracts Python float from single-element tensor
 
+        # Per-class confusion counts on argmax preds. no_grad() because preds
+        # are detached labels; nothing here needs an autograd graph.
+        with torch.no_grad():
+            preds = logits.argmax(dim=-1)
+            batch_tp, batch_fp, batch_fn = accumulate_class_counts(
+                preds, labels, n_classes,
+            )
+            tp += batch_tp
+            fp += batch_fp
+            fn += batch_fn
+
     train_loss = total_loss / len(loader)
-    return train_loss
+    return train_loss, tp, fp, fn
 
 
 @torch.no_grad()  # disables gradient computation — saves memory during eval
@@ -328,7 +373,44 @@ def train_network(
     # F1 classes (wrist_smash + its confusion partner smash). Renormalised to
     # mean 1.0 so the overall loss magnitude stays comparable to uniform CE
     # (keeps LR / grad-clip behaviour aligned across cells). None = uniform.
-    if hyp.class_weights:
+    #
+    # adaptive_focal: class-F1-driven CDB-loss with optional focal modulation.
+    # Replaces the static class_weights lever with an EMA-smoothed per-class
+    # weight that re-prioritises classes whose train F1 stays low. Mutually
+    # exclusive with class_weights and forces label_smoothing=0 (LS softens
+    # targets, contaminating focal's per-sample hardness estimate).
+    if hyp.adaptive_focal is not None:
+        if hyp.class_weights:
+            raise ValueError(
+                'adaptive_focal and class_weights are mutually exclusive; '
+                'set one of them to None.'
+            )
+        if hyp.label_smoothing != 0.0:
+            raise ValueError(
+                'adaptive_focal requires label_smoothing=0.0 (LS softens '
+                'targets so confident-correct samples have p_t < 1.0, '
+                "contaminating focal's per-sample hardness signal). "
+                f'Got label_smoothing={hyp.label_smoothing}.'
+            )
+        af_cfg = hyp.adaptive_focal
+        loss_fn = AdaptiveFocalLoss(
+            n_classes=n_classes,
+            class_names=class_ls,
+            tau=af_cfg.get('tau', 1.0),
+            gamma=af_cfg.get('gamma', 1.0),
+            momentum=af_cfg.get('momentum', 0.9),
+            warm_up_epochs=af_cfg.get('warm_up_epochs', 5),
+            f1_floor=af_cfg.get('f1_floor', 0.0),
+            device=device,
+        )
+        print(
+            f"[loss] adaptive focal (CDB-F1): "
+            f"tau={loss_fn.tau}, gamma={loss_fn.gamma}, "
+            f"momentum={loss_fn.momentum}, "
+            f"warm_up_epochs={loss_fn.warm_up_epochs}, "
+            f"f1_floor={loss_fn.f1_floor}"
+        )
+    elif hyp.class_weights:
         weights = torch.ones(n_classes, device=device)
         for cls_name, multiplier in hyp.class_weights.items():
             if cls_name not in class_ls:
@@ -377,16 +459,23 @@ def train_network(
         model.set_schedule_factors(cg_factor=aux_factor, ap_factor=aux_factor)
 
         t0 = time.time()
-        train_loss = train_one_epoch(
+        train_loss, train_tp, train_fp, train_fn = train_one_epoch(
             model=model,
             loader=train_loader,
             random_shift_fn=random_shift_fn,
             n_bones=n_bones,
+            n_classes=n_classes,
             loss_fn=loss_fn,
             optimizer=optimizer,
             scheduler=scheduler,
-            device=device
+            device=device,
         )
+        # End-of-epoch per-class train F1 feeds AdaptiveFocalLoss; otherwise
+        # the values are still computed (cheap) and logged to TB for context.
+        train_per_class_f1 = per_class_f1_from_counts(train_tp, train_fp, train_fn)
+        if isinstance(loss_fn, AdaptiveFocalLoss):
+            loss_fn.update_alpha(train_per_class_f1)
+
         val_loss, f1_score_avg, f1_score_min, f1_per_class, present = validate(
             model=model,
             loss_fn=loss_fn,
@@ -399,11 +488,27 @@ def train_network(
               f'val_loss={val_loss:.3f}, macro_f1={f1_score_avg:.3f}, min_f1={f1_score_min:.3f} '
               f'- {t1 - t0:.2f} s')
 
+        if isinstance(loss_fn, AdaptiveFocalLoss):
+            # Top-3 / bot-3 alpha summary so the operator can eyeball whether
+            # the loss is reweighting toward the struggling classes each epoch.
+            alpha_np = loss_fn.alpha.detach().cpu().numpy()
+            order = alpha_np.argsort()
+            print('  alpha bot3: ' + ' '.join(
+                f'{class_ls[i]}={alpha_np[i]:.2f}' for i in order[:3]
+            ))
+            print('  alpha top3: ' + ' '.join(
+                f'{class_ls[i]}={alpha_np[i]:.2f}' for i in order[-3:][::-1]
+            ))
+
         writer.add_scalar('Loss/Train', train_loss, epoch)
         writer.add_scalar('Loss/Val', val_loss, epoch)
         writer.add_scalar('F1/Val_macro', f1_score_avg, epoch)
         writer.add_scalar('F1/Val_min', f1_score_min, epoch)
         writer.add_scalar('Schedule/aux_factor', aux_factor, epoch)
+        for i, c in enumerate(class_ls):
+            writer.add_scalar(f'F1_train/{c}', train_per_class_f1[i].item(), epoch)
+            if isinstance(loss_fn, AdaptiveFocalLoss):
+                writer.add_scalar(f'Alpha/{c}', loss_fn.alpha[i].item(), epoch)
 
         curr_macro, curr_min = f1_score_avg.item(), f1_score_min.item()
 
