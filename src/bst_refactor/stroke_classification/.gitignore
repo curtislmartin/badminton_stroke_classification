@@ -9,6 +9,11 @@
 # best checkpoint per run.
 main_on_shuttleset/experiments/*/weights/*
 
+# Auto-backups from the hparam_sweep wrapper's resume-safe manifest
+# rewrites (manifest.yaml.<timestamp>.bak per serial completion).
+# Original manifest.yaml stays tracked; backups are runtime noise.
+main_on_shuttleset/experiments/**/*.bak
+
 # Aim experiment tracker cache (optional UI, local only; created in cwd when
 # aim_backfill.py or `aim up` runs from main_on_shuttleset/).
 main_on_shuttleset/.aim/
@@ -95,3 +100,15 @@ main_on_shuttleset/.aim/
 
 # run_20260505_154907: Aug framework v1, p_jitter 0.2 -> 0.3 (under-reg test). Hparams otherwise identical to the previous aug run (run_20260505_111211). S5 best (top min 0.515 project high, smash 0.515 / ws 0.519: smash again the floor class, pair sum 1.033). Mean 0.7447/0.4779/0.7635/0.9394. Vs prev aug run: macro +0.6, min +0.3, acc +0.4, top-2 ~flat. Vs wipe_drop best: macro -0.3, min +0.4, acc -0.2, top-2 +0.4. Aug now at parity-or-better than wipe_drop on the head metrics, ahead on floor and top-2. Rush +2.6%, drive +2.6% picked up; cross_court_net_shot -5.4% persists (not on the exposure axis; flip ablation flagged).
 !main_on_shuttleset/experiments/run_20260505_154907/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides_5.pt
+
+# run_20260505_213008_504674: Aug-sweep cell `p_flip_25` from sweep_20260505_211814_aug_v1_round_1. Single-knob change vs prior best (run_20260505_154907): p_flip 0.5 -> 0.25. S3 best (macro 0.7426 within 0.24% of run-top S1, min 0.4785 best in close-macro band; state.json's S2 had top min 0.5097 but macro 1% below S1, outside the seed envelope). Mean 0.7402/0.4783/0.7602/0.9383. Vs prior best: macro -0.5, min ~flat, acc -0.3, top-2 -0.1. Inside seed envelope. Verdict TIE. Smash +5.3%, push -4.1%, rush -2.4%; cross_court_net_shot ~flat (not testable at this sample size — per-class seed noise on cross_court ~11% range across 5 serials).
+!main_on_shuttleset/experiments/run_20260505_213008_504674/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides_3.pt
+
+# run_20260505_233645_734631: Aug-sweep cell `cap_bump` from sweep_20260505_211814_aug_v1_round_1. Two-knob change vs prior best: cap_y 0.05 -> 0.075, cap_x 0.10 -> 0.15. Killed at S4 by macro tolerance (cumulative mean macro 0.7339 vs ref 0.7447, 1.08% deficit > 0.7%). S3 best (top min 0.4803, macro 0.7349 within 0.30% of run-top). 4-serial mean 0.7339/0.4587/0.7539/0.9344. Vs prior best: macro -1.1, min -1.9, acc -1.1, top-2 -0.5. Verdict LOSE. cross_court_net_shot -8.0% on cell mean, the cleanest causal signal of the sweep: bigger jitter magnitude bites cross_court hardest. Magnitude axis exhausted.
+!main_on_shuttleset/experiments/run_20260505_233645_734631/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides_3.pt
+
+# run_20260506_011851_522295: Aug-sweep cell `p_jitter_40` from sweep_20260505_211814_aug_v1_round_1. Single-knob change vs prior best: p_jitter 0.3 -> 0.4. S1 best (top macro 0.7506, top acc 0.7684, top top-2 0.9455 — all run-of-the-round highs across the sweep; min 0.4760 solid; state.json's S3 had top min 0.5104 but macro 1.09% below S1, outside the seed envelope). Mean 0.7426/0.4822/0.7610/0.9409. Vs prior best: macro -0.2, min +0.4, acc -0.3, top-2 +0.2. Inside seed envelope; mild positive lean on min. Verdict TIE. Cell-mean min F1 0.4822 a tentative project-wide cell-mean min F1 high (prior ref 0.4778) but inside the ~2% noise floor.
+!main_on_shuttleset/experiments/run_20260506_011851_522295/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides.pt
+
+# run_20260506_032632_652587: Aug-sweep cell `p_flip_25_x_p_jitter_30` from sweep_20260505_211814_aug_v1_round_1. Cell config p_flip=0.25, p_jitter=0.3 — the p_jitter override matched the base, so the effective config is identical to `p_flip_25`. Two 5-serial cells with same aug, different seeds: macro spread 0.13%, min spread 2.14%, acc spread 0.14%, top-2 spread 0.02%. That seed-noise envelope is the most useful finding from the cell. S1 best (top macro 0.7447 = prior ref, top min 0.5231 ws — single-serial joint best of the round on macro x min, new project-wide single-serial min F1 high). Mean 0.7389/0.4569/0.7588/0.9385. Vs prior best: macro -0.6, min -2.1, acc -0.7, top-2 -0.1. Verdict LOSE — but the same-config replicate p_flip_25 came in at TIE, so this cell's LOSE is the unlucky tail of a noise-sized cell-to-cell swing.
+!main_on_shuttleset/experiments/run_20260506_032632_652587/weights/bst_CG_AP_JnB_bone_between_2_hits_with_max_limits_seq_100_une_merge_v1_nosides.pt
