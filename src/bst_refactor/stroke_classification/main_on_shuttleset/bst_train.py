@@ -21,6 +21,7 @@ from pathlib import Path
 from copy import deepcopy
 from collections import namedtuple
 from contextlib import redirect_stdout
+import argparse
 import math
 import time
 from datetime import datetime, timedelta
@@ -994,6 +995,72 @@ def _validate_and_record_arch(
 # ==========================================================================
 
 if __name__ == '__main__':
+    # CLI is wrapper-friendly: hparam_sweep.py drives per-serial invocations
+    # by setting --serial-no with a fixed --run-id and --log-path so all five
+    # serials share a run dir and a single test log. Manual invocations leave
+    # everything unset to fall back to the module-level Hyp defaults plus a
+    # fresh timestamped run dir / log file.
+    parser = argparse.ArgumentParser(
+        description='BST training entry point. CLI flags exist mainly for the '
+                    'hparam_sweep wrapper; running with no flags trains a full '
+                    '5-serial run from the module-level Hyp defaults.',
+    )
+    parser.add_argument(
+        '--serial-no', type=int, default=None,
+        help='Run only this serial (1-5) and exit. Used by hparam_sweep to '
+             'pause between serials for kill checks. Requires --log-path and '
+             '--run-id when serial-no > 1.',
+    )
+    parser.add_argument(
+        '--run-id', type=str, default=None,
+        help='Resume into an existing experiments/<run_id>/ dir. Required when '
+             '--serial-no > 1; optional otherwise (a fresh run_<timestamp> is '
+             'minted if absent).',
+    )
+    parser.add_argument(
+        '--log-path', type=str, default=None,
+        help='Pin the test log file path. Required when --serial-no > 1 so all '
+             'serials append to the same log file. Without it, each invocation '
+             'creates a fresh test_logs/test_<timestamp>.log.',
+    )
+    parser.add_argument('--p-flip', type=float, default=None)
+    parser.add_argument('--p-jitter', type=float, default=None)
+    parser.add_argument('--cap-y', type=float, default=None)
+    parser.add_argument('--cap-x', type=float, default=None)
+    parser.add_argument('--eps', type=float, default=None)
+    args = parser.parse_args()
+
+    # Per-serial invocation contract: pass all three sharing-flags together so
+    # the five invocations land in one run dir with one continuous log file.
+    if args.serial_no is not None:
+        if not (1 <= args.serial_no <= 5):
+            raise ValueError(
+                f'--serial-no must be 1-5, got {args.serial_no!r}.'
+            )
+        if args.serial_no > 1 and (args.log_path is None or args.run_id is None):
+            raise ValueError(
+                '--serial-no > 1 requires both --log-path and --run-id so '
+                'subsequent serials append to the same log and share the run dir.'
+            )
+
+    # Augmentation CLI overrides are all-or-nothing. Wrapper passes the full
+    # cell-config dict (base + overrides resolved); manual invocations leave
+    # them all None and use the module-level Hyp defaults.
+    aug_overrides = [args.p_flip, args.p_jitter, args.cap_y, args.cap_x, args.eps]
+    if any(x is not None for x in aug_overrides):
+        if not all(x is not None for x in aug_overrides):
+            raise ValueError(
+                'Augmentation CLI overrides must be all-or-nothing. Pass either '
+                'all five (--p-flip --p-jitter --cap-y --cap-x --eps) or none.'
+            )
+        hyp = hyp._replace(augmentation={
+            'p_flip':   args.p_flip,
+            'p_jitter': args.p_jitter,
+            'cap_y':    args.cap_y,
+            'cap_x':    args.cap_x,
+            'eps':      args.eps,
+        })
+
     taxonomy = TAXONOMIES[hyp.taxonomy]
 
     # Collated dir naming via shared helper (mirrored on the prepare_train
@@ -1050,7 +1117,7 @@ if __name__ == '__main__':
     # work begins, so the original is always recoverable. Test logs are
     # safe regardless: each invocation gets a fresh timestamped log file.
     # ----------------------------------------------------------------------
-    resume_from: str | None = None
+    resume_from: str | None = args.run_id
 
     timestamp = f'{datetime.now():%Y%m%d_%H%M%S}'
     run_id = resume_from or f'run_{timestamp}'
@@ -1067,7 +1134,7 @@ if __name__ == '__main__':
     script_dir = Path(__file__).resolve().parent
     log_dir = script_dir / 'test_logs'
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f'test_{timestamp}.log'
+    log_path = Path(args.log_path) if args.log_path else log_dir / f'test_{timestamp}.log'
     experiments_dir = script_dir / 'experiments'
 
     # Resume mutates manifest.yaml on serial 1 (see _validate_and_record_arch).
@@ -1119,9 +1186,30 @@ if __name__ == '__main__':
                 'fail on shape mismatch for v1/nosides/raw_35 dropunk weights.'
             )
 
-    with open(log_path, 'w') as log_f:
+    # Per-serial invocation: run only the requested serial. Otherwise loop 1-5
+    # as before. Log open mode flips to append for serial-no > 1 so the second
+    # through fifth invocations don't clobber the S1 block.
+    if args.serial_no is not None:
+        serial_range = range(args.serial_no, args.serial_no + 1)
+        log_open_mode = 'a' if args.serial_no > 1 else 'w'
+    else:
+        serial_range = range(1, 6)
+        log_open_mode = 'w'
+
+    # Arch validation gate: skip if the manifest already carries an arch block.
+    # This handles per-serial invocations (S2-S5 skip because S1 already
+    # validated) and resumed cells (skip if arch was preserved). Fresh runs
+    # and resumed-without-arch cells fall through and validate.
+    arch_already_present = False
+    manifest_path_check = run_dir / 'manifest.yaml'
+    if manifest_path_check.exists():
+        with open(manifest_path_check) as f:
+            existing_manifest = yaml.safe_load(f) or {}
+        arch_already_present = 'arch' in existing_manifest.get('extra', {})
+
+    with open(log_path, log_open_mode) as log_f:
         tee = Tee(sys.stdout, log_f)
-        for serial_no in range(1, 6):
+        for serial_no in serial_range:
             print(f'Running serial {serial_no} ...')
             task = Task(
                 n_joints=17, taxonomy=taxonomy, weight_dir=weight_dir,
@@ -1132,12 +1220,11 @@ if __name__ == '__main__':
                 train_partial=hyp.train_partial
             )
 
-            # First-serial-only: surface the live arch derivation, run the
+            # Validate arch the first time in this invocation if not already
+            # validated. Surfaces the live arch derivation, runs the
             # expected_active_classes lever and the resume cross-check, and
-            # write the arch block into the manifest. Subsequent serials use
-            # the same dir, so the derivation is deterministic and we just
-            # don't repeat the manifest write.
-            if serial_no == 1:
+            # writes the arch block into the manifest.
+            if not arch_already_present:
                 _validate_and_record_arch(
                     run_dir=run_dir,
                     task=task,
@@ -1146,6 +1233,7 @@ if __name__ == '__main__':
                     resumed_manifest_arch=resumed_manifest_arch,
                     tee=tee,
                 )
+                arch_already_present = True
 
             task.get_network_architecture(model_name='BST_CG_AP', in_channels=(3 if hyp.use_3d_pose else 2))
 
