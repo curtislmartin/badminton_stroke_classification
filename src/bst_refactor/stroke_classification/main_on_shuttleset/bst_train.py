@@ -131,7 +131,7 @@ hyp = Hyp(
     # traces in scratch/architecture_notes/augmentation_framework.md.
     augmentation={
         'p_flip':   0.5,
-        'p_jitter': 0.2,
+        'p_jitter': 0.3,
         'cap_y':    0.05,
         'cap_x':    0.10,
         'eps':      0.15,
@@ -180,7 +180,7 @@ def train_one_epoch(
     optimizer: optim.Optimizer,
     scheduler: optim.lr_scheduler.LambdaLR,  # learning rate scheduler
     device,
-) -> tuple[float, Tensor, Tensor, Tensor, int, int]:
+) -> tuple[float, Tensor, Tensor, Tensor, int, int, int]:
     """Train for one epoch, accumulating per-class TP / FP / FN alongside loss.
 
     Per-class counts feed ``AdaptiveFocalLoss.update_alpha`` at the call site.
@@ -190,14 +190,18 @@ def train_one_epoch(
 
     Augmentations fire flip-then-jitter per the framework doc. Both ops
     roll independently per-clip so within a batch some clips are
-    flipped, some jittered, some both, some neither. Jitter's
-    effective-fired count (rolled yes AND at least one axis non-degenerate)
-    accumulates into ``jitter_n_effective`` for the
-    ``Aug/jitter_effective_rate`` TB scalar.
+    flipped, some jittered, some both, some neither. Jitter accumulates
+    two diagnostic counters across the epoch:
 
-    :return: ``(train_loss, tp, fp, fn, jitter_n_effective, jitter_n_total)``.
-        Counts are length-``n_classes`` int64 tensors on ``device``;
-        jitter accumulators are plain ints over the epoch's clips.
+    - ``jitter_n_effective``: clips that received a non-zero shift, for
+      ``Aug/jitter_effective_rate`` (case-1 dropout indicator).
+    - ``jitter_n_oob``: clips whose effective shift pushed at least one
+      previously-real shuttle frame off-screen, triggering the
+      ``(0, 0)`` sentinel; for ``Aug/shuttle_oob_rate``.
+
+    :return: ``(train_loss, tp, fp, fn, jitter_n_effective, jitter_n_oob,
+        jitter_n_total)``. Counts are length-``n_classes`` int64 tensors on
+        ``device``; jitter accumulators are plain ints over the epoch's clips.
     """
     model.train()  # enable dropout + batchnorm training mode (TF: training=True)
     total_loss = 0.0
@@ -205,6 +209,7 @@ def train_one_epoch(
     fp = torch.zeros(n_classes, dtype=torch.long, device=device)
     fn = torch.zeros(n_classes, dtype=torch.long, device=device)
     jitter_n_effective = 0
+    jitter_n_oob = 0
     jitter_n_total = 0
 
     for (human_pose, pos, shuttle), video_len, labels in loader:
@@ -222,8 +227,11 @@ def train_one_epoch(
         # post-flip+post-swap joints; constrained_jitter shifts pos+shuttle
         # only with layered-conditional bounds and zero-frame preservation.
         human_pose, pos, shuttle = coupled_flip(human_pose, pos, shuttle)
-        human_pose, pos, shuttle, n_eff = constrained_jitter(human_pose, pos, shuttle)
+        human_pose, pos, shuttle, n_eff, n_oob = constrained_jitter(
+            human_pose, pos, shuttle,
+        )
         jitter_n_effective += n_eff
+        jitter_n_oob += n_oob
         jitter_n_total += human_pose.shape[0]
 
         # Flatten last two dims (joints/bones, xy) into one feature dim for the model
@@ -251,7 +259,7 @@ def train_one_epoch(
             fn += batch_fn
 
     train_loss = total_loss / len(loader)
-    return train_loss, tp, fp, fn, jitter_n_effective, jitter_n_total
+    return train_loss, tp, fp, fn, jitter_n_effective, jitter_n_oob, jitter_n_total
 
 
 @torch.no_grad()  # disables gradient computation — saves memory during eval
@@ -536,7 +544,8 @@ def train_network(
         model.set_schedule_factors(cg_factor=aux_factor, ap_factor=aux_factor)
 
         t0 = time.time()
-        train_loss, train_tp, train_fp, train_fn, jitter_n_eff, jitter_n_total = train_one_epoch(
+        train_loss, train_tp, train_fp, train_fn, \
+            jitter_n_eff, jitter_n_oob, jitter_n_total = train_one_epoch(
             model=model,
             loader=train_loader,
             coupled_flip=coupled_flip,
@@ -596,6 +605,16 @@ def train_network(
             jitter_n_eff / jitter_n_total if jitter_n_total > 0 else 0.0
         )
         writer.add_scalar('Aug/jitter_effective_rate', jitter_effective_rate, epoch)
+        # Shuttle OOB rate: fraction of clips where the effective shift
+        # pushed a previously-real shuttle frame off-screen, triggering the
+        # (0, 0) sentinel. Diagnostic for the cap_x trade-off the doc flags
+        # around edge-of-frame shuttle classes (cross_court_net_shot, rush
+        # trajectories). High rate = cap_x is replacing a meaningful fraction
+        # of real shuttle observations with the off-screen sentinel.
+        shuttle_oob_rate = (
+            jitter_n_oob / jitter_n_total if jitter_n_total > 0 else 0.0
+        )
+        writer.add_scalar('Aug/shuttle_oob_rate', shuttle_oob_rate, epoch)
         for i, c in enumerate(class_ls):
             writer.add_scalar(f'F1_train/{c}', train_per_class_f1[i].item(), epoch)
             if isinstance(loss_fn, AdaptiveFocalLoss):

@@ -1,34 +1,32 @@
-"""Train-time augmentations for BST: coupled centreline flip + constrained pos+shuttle jitter.
+"""Training augmentations for BST: a left-right flip and a small position shift.
 
-Replaces the inherited ``RandomTranslation_batch`` (joints-only, decoupled,
-body-deforming) with the locked Task-2 set described in
-``scratch/architecture_notes/augmentation_framework.md``.
+Replaces the previous joints-only translation, which didn't move the
+shuttle or court coordinates with it. Two augmentations, each with its
+own per-clip random roll:
 
-Two independent ops, each with its own per-clip Bernoulli roll:
+- ``CoupledFlip``: mirrors the clip left-to-right across the court
+  centreline. Flips player positions, shuttle position, and joint
+  coordinates together so they stay aligned. Also swaps the COCO-17
+  left/right joint pairs (e.g. left wrist with right wrist) so each
+  joint slot keeps a consistent meaning regardless of orientation.
+  Bones are recomputed from the flipped joints using the same pair
+  table the collation uses, so the bone vectors come out right
+  automatically.
 
-- ``CoupledFlip``: mirrors across the court centreline. Couples the flip
-  across all three streams in their own coord frames (``pos.x -> 1 - x``
-  in court frame; ``shuttle.x -> 1 - x`` in camera frame; joints
-  ``x -> -x`` around each player's bbox centre). Applies the COCO-17
-  bilateral joint-index swap so per-channel TCN semantics stay consistent
-  across orientations. Bones are recomputed from the post-flip+post-swap
-  joints via the same ``bone_pairs`` source of truth used at collation,
-  so the X-component sign flip and the bilateral bone-slot swap fall
-  out automatically.
+- ``ConstrainedJitter``: shifts the clip's player positions and
+  shuttle position by a small ``(dx, dy)``, the same shift applied
+  to every frame. Joints and bones aren't touched. The shift size
+  is bounded per-clip so that players who started inside the court
+  don't get pushed out, and clips that didn't have a player crossing
+  the centreline don't pick one up from the shift. Frames that were
+  zeroed before the shift (because pose detection failed there, or
+  the data loader zero-padded a short clip) stay zero. If the shift
+  pushes the shuttle outside the visible frame, it gets set to
+  ``(0, 0)``, the same off-screen signal the model already handles
+  for natural off-screen frames.
 
-- ``ConstrainedJitter``: per-clip uniform ``(dx, dy)`` applied to ``pos``
-  (court frame) and ``shuttle`` (camera frame, coarse approximation;
-  see doc for the off-axis-camera caveat). Joints and bones untouched.
-  Bounds are layered conditionally: a per-axis constraint only counts
-  for a clip when the corresponding player respects it pre-shift, so
-  the aug never *introduces* a centreline-crossing or band-exceeding
-  artefact. Pre-existing zeroed frames (sticky_anchor rally-presence
-  drop on pos; TrackNet failure on shuttle) are restored to zero
-  post-shift; shuttle that lands outside ``[0, 1]^2`` post-shift gets
-  ``(0, 0)`` to mirror TrackNet's off-screen sentinel.
-
-Per-clip rolls vectorised across the batch on whichever device the
-input tensors live on. Both ops are train-only.
+Both ops fire per-clip across the batch using torch on whichever
+device the inputs live on. Both run only during training.
 """
 
 from __future__ import annotations
@@ -49,10 +47,12 @@ BILATERAL_JOINT_PAIRS: tuple[tuple[int, int], ...] = (
 
 
 def _coco_swap_index(n_joints: int, device: torch.device) -> Tensor:
-    """Build the permutation index that swaps bilateral joint pairs in-place.
+    """Build a lookup index that swaps left/right joint pairs.
 
-    ``joints[..., swap_idx, :]`` returns the swapped tensor. For un-paired
-    indices (just the nose at slot 0) the index is identity.
+    Applying ``joints[..., swap_idx, :]`` moves the data at slot 5 (left
+    shoulder) into slot 6 (right shoulder) and vice versa, and similarly
+    for every other left/right pair. Slot 0 (nose) has no mirror partner
+    and stays in place.
     """
     swap_idx = torch.arange(n_joints, device=device)
     for a, b in BILATERAL_JOINT_PAIRS:
@@ -63,16 +63,16 @@ def _coco_swap_index(n_joints: int, device: torch.device) -> Tensor:
 
 
 def recompute_bones_torch(joints: Tensor, pairs: list[tuple[int, int]]) -> Tensor:
-    """Torch port of ``shuttleset_dataset.create_bones``.
+    """Torch version of ``shuttleset_dataset.create_bones``.
 
-    Matches the original numpy implementation exactly, including the
-    elementwise per-component zero-suppression (a bone xy gets zeroed
-    when the corresponding xy of either endpoint is zero).
+    Matches the numpy implementation exactly. Each bone is the vector
+    from its start joint to its end joint. If either endpoint's x or y
+    is zero (meaning the joint detection failed there), the corresponding
+    bone component is set to zero too.
 
     :param joints: tensor of shape ``(..., J, 2)``.
-    :param pairs: list of ``(start_idx, end_idx)`` joint-pair tuples
-                  defining each bone, in the same order ``create_bones``
-                  walks them.
+    :param pairs: list of ``(start_idx, end_idx)`` tuples, one per bone,
+                  in the same order ``create_bones`` walks them.
     :return: bones tensor of shape ``(..., B, 2)`` where ``B = len(pairs)``.
     """
     start_indices = torch.tensor(
@@ -88,24 +88,30 @@ def recompute_bones_torch(joints: Tensor, pairs: list[tuple[int, int]]) -> Tenso
 
 
 class CoupledFlip:
-    """Centreline flip across pos + shuttle + joints + bones.
+    """Mirrors a clip left-to-right across the court centreline.
 
-    Per-clip independent Bernoulli roll at probability ``p``. When fired,
-    the clip's three streams flip together in their own coord origins,
-    the COCO bilateral joint slots swap, and bones are recomputed from
-    the post-flip+post-swap joints.
+    For each clip in the batch, with probability ``p``, this flips the
+    player positions, shuttle position, and joint coordinates together,
+    then swaps the COCO-17 left/right joint pairs so each joint slot
+    keeps a consistent meaning across flipped and unflipped samples.
+    Bones are recomputed from the flipped joints using the same pair
+    table the collation uses on disk, which gives the right flipped
+    bone vectors automatically.
 
-    :param p: per-clip flip probability. Defaults to 0.5 (literature norm
-              for skeleton-AR; effectively doubles the training set).
-    :param n_joints: count of joint slots along the pose-feature axis
-                     before bones. 17 for COCO-17.
-    :param n_bones: count of bone slots after the joints. ``human_pose[..., -n_bones:, :]``
-                    is the bone slice; ``human_pose[..., :-n_bones, :]`` is joints.
-                    Required for ``pose_style='JnB_bone'``; the asserting caller
-                    enforces ``n_bones > 0``.
-    :param bone_pairs: list of joint-pair indices defining each bone,
-                       matching the source-of-truth used at collation.
-                       Defaults to ``get_bone_pairs('coco')``.
+    :param p: probability of flipping each clip. Defaults to 0.5 (the
+              standard skeleton-AR rate; at 0.5 the model effectively
+              sees both orientations equally).
+    :param n_joints: number of joints stored before bones along the
+                     pose-feature axis. 17 for COCO-17.
+    :param n_bones: number of bones stored after the joints.
+                    ``human_pose[..., :-n_bones, :]`` is the joint
+                    slice; ``human_pose[..., -n_bones:, :]`` is the
+                    bone slice. The caller asserts ``pose_style ==
+                    'JnB_bone'`` so this is always positive.
+    :param bone_pairs: list of ``(start_joint, end_joint)`` tuples,
+                       one per bone, matching the table used at
+                       collation time. Defaults to
+                       ``get_bone_pairs('coco')``.
     """
 
     def __init__(
@@ -129,14 +135,15 @@ class CoupledFlip:
     def __call__(
         self, human_pose: Tensor, pos: Tensor, shuttle: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Apply per-clip coupled flip to all three streams.
+        """Flip selected clips across all three streams together.
 
-        :param human_pose: ``(n, t, m, J+B, 2)``. Joints occupy the first
-                           ``J`` slots; bones the last ``B``.
-        :param pos: ``(n, t, m, 2)`` court-relative xy.
-        :param shuttle: ``(n, t, 2)`` camera-resolution-relative xy.
-        :return: same three tensors with flipped clips updated in-place
-                 of the returned views (originals not mutated).
+        :param human_pose: ``(n, t, m, J+B, 2)``. The first ``J`` slots
+                           are joints; the last ``B`` slots are bones.
+        :param pos: ``(n, t, m, 2)`` player position in court coordinates.
+        :param shuttle: ``(n, t, 2)`` shuttle position in camera
+                        coordinates.
+        :return: the three input tensors with flipped clips updated.
+                 The originals are not modified.
         """
         n = human_pose.shape[0]
         device = human_pose.device
@@ -149,10 +156,10 @@ class CoupledFlip:
             return human_pose, pos, shuttle
 
         joints = human_pose[..., :-self.n_bones, :]
-        # Select-and-replace pattern: build the fully-flipped tensor, then
-        # use torch.where with a broadcasted mask to keep unflipped clips
-        # untouched. Cheaper than indexing for typical batch sizes since
-        # the underlying ops are vectorised.
+        # Build the fully-flipped tensor first, then use torch.where to
+        # keep unflipped clips untouched. Faster than indexing into the
+        # batch with a boolean mask since the underlying ops are all
+        # vectorised.
 
         # pos: x -> 1 - x in court frame
         pos_flipped = pos.clone()
@@ -174,12 +181,13 @@ class CoupledFlip:
         joints_mask = flip_mask.view(n, 1, 1, 1, 1).expand_as(joints)
         joints_out = torch.where(joints_mask, joints_swapped, joints)
 
-        # bones: recompute from post-flip+post-swap joints. Same recompute
-        # is done unconditionally on the full batch; for unflipped clips the
-        # recomputed bones equal the originals by construction (deterministic
-        # function of joints), so the where-broadcast restores the originals.
-        # For flipped clips the recompute carries both the X-component sign
-        # flip and the bilateral bone-slot swap automatically.
+        # Bones are recomputed from the (possibly-flipped) joints. The
+        # recompute runs on every clip in the batch. For unflipped clips,
+        # the result matches the bones already on disk because the
+        # formula is a deterministic function of the joint inputs. For
+        # flipped clips, the recompute produces the correct flipped bone
+        # vectors automatically: swapping the joint slots before
+        # subtracting them gives the right vector at each bone slot.
         bones_recomputed = recompute_bones_torch(joints_out, self.bone_pairs)
         human_pose_out = torch.cat([joints_out, bones_recomputed], dim=-2)
 
@@ -187,27 +195,35 @@ class CoupledFlip:
 
 
 class ConstrainedJitter:
-    """Layered-bound pos+shuttle jitter. Joints and bones untouched.
+    """Shifts the clip's player and shuttle positions by a small ``(dx, dy)``.
 
-    Per-clip independent Bernoulli roll at probability ``p_roll``. When
-    the roll fires, per-clip layered bounds are computed from the clip's
-    own pos extremes (so a player who is already out-of-band pre-shift
-    drops their constraint, and we never *introduce* a band violation).
-    A single ``(dx, dy)`` is drawn uniformly from the per-axis envelope
-    intersected with the magnitude cap, applied to every frame of pos
-    and shuttle, with zero-frame preservation and shuttle off-screen
-    mirroring on top.
+    Joints and bones aren't touched. For each clip in the batch, with
+    probability ``p_roll``, a single ``(dx, dy)`` is drawn and applied
+    identically to every frame of ``pos`` and ``shuttle``. The shift
+    size is bounded per-clip so it can't push a player who started
+    inside the court out of it, and can't introduce a centreline
+    crossing on a clip that didn't already have one. A fixed magnitude
+    cap further limits the shift regardless of the per-clip bound.
+    Frames that were zeroed in the input (because pose or shuttle
+    detection failed there, or the data loader zero-padded a short
+    clip) stay zero. If the shift pushes the shuttle outside the
+    visible frame, it gets set to ``(0, 0)``, the same off-screen
+    signal the model already handles for naturally-missing shuttle
+    frames.
 
-    :param p_roll: per-clip nominal roll probability. Effective
-                   augmentation rate is ``p_roll * P(at least one
-                   non-degenerate axis)``; logged via the
-                   ``Aug/jitter_effective_rate`` TB scalar.
-    :param cap_y: magnitude cap on dy. Tight (0.05 default) to preserve
-                  back/front court-zone class signal.
-    :param cap_x: magnitude cap on dx. Looser (0.10 default) since x
-                  carries less direct class info than trajectory shape.
-    :param eps: rally-presence acceptance margin matching
-                ``sticky_anchor.generous_margin = 0.15``.
+    :param p_roll: probability of shifting each clip. The realised rate
+                   is slightly lower if some clips have a constraint
+                   that leaves no room for any shift; the actual rate
+                   is logged in the ``Aug/jitter_effective_rate``
+                   TB scalar.
+    :param cap_y: maximum shift magnitude on y. Default 0.05; tight
+                  because y carries court-zone information that
+                  distinguishes shot classes.
+    :param cap_x: maximum shift magnitude on x. Default 0.10; looser
+                  because x carries less direct class information.
+    :param eps: margin matching ``sticky_anchor.generous_margin = 0.15``,
+                the band outside which the model treats positions
+                as invalid.
     """
 
     def __init__(
@@ -224,37 +240,65 @@ class ConstrainedJitter:
 
     def __call__(
         self, human_pose: Tensor, pos: Tensor, shuttle: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, int]:
-        """Apply per-clip layered-bound jitter to pos + shuttle.
+    ) -> tuple[Tensor, Tensor, Tensor, int, int]:
+        """Apply the per-clip shift to pos and shuttle.
 
-        :return: ``(human_pose, pos_out, shuttle_out, n_effective)``.
-                 ``n_effective`` is the count of clips in this batch
-                 that actually received a non-zero shift (rolled yes
-                 AND at least one axis non-degenerate); used for the
-                 epoch-level effective-rate TB scalar.
+        :return: ``(human_pose, pos_out, shuttle_out, n_effective, n_oob)``.
+                 ``n_effective`` is the number of clips that actually
+                 received a non-zero shift this batch (rolled in, plus
+                 had at least one axis with room to shift). Used for
+                 the ``Aug/jitter_effective_rate`` TB scalar.
+                 ``n_oob`` is the number of clips where the shift
+                 pushed at least one previously-visible shuttle frame
+                 off-screen, setting it to ``(0, 0)``. Used for the
+                 ``Aug/shuttle_oob_rate`` TB scalar.
         """
         n = pos.shape[0]
         device = pos.device
 
         if self.p_roll <= 0.0:
-            return human_pose, pos, shuttle, 0
+            return human_pose, pos, shuttle, 0, 0
 
         roll_mask = torch.rand(n, device=device) < self.p_roll
         if not roll_mask.any():
-            return human_pose, pos, shuttle, 0
+            return human_pose, pos, shuttle, 0, 0
 
-        # Per-clip extremes used for the layered-conditional bounds.
+        # Compute the per-clip min and max of pos along x and y. These set
+        # the bounds for the shift: e.g. if the bottom player's lowest y
+        # in this clip is 0.55, we can shift down by at most 0.05 before
+        # pushing them across the centreline.
         # pos: (n, t, m=2, 2), m=0 top, m=1 bot. Last dim is xy.
-        y_top = pos[:, :, 0, 1]  # (n, t)
-        y_bot = pos[:, :, 1, 1]  # (n, t)
-        y_top_max = y_top.amax(dim=1)  # (n,)
-        y_top_min = y_top.amin(dim=1)
-        y_bot_max = y_bot.amax(dim=1)
-        y_bot_min = y_bot.amin(dim=1)
+        #
+        # Frames where pos is exactly (0, 0) are sentinels meaning "no
+        # real position here": either the data loader zero-padded a short
+        # clip, or pose detection failed and sticky_anchor zeroed the
+        # frame. They have to be excluded from the min/max, otherwise a
+        # clip with a real bot range of [0.55, 0.7] plus some padded zeros
+        # would read its minimum as 0 and incorrectly drop the centreline
+        # constraint.
+        #
+        # We replace sentinel frames with -inf for the max calculation and
+        # +inf for the min calculation, so they never win the reduction.
+        # Real positions never land at exactly (0, 0): normalize_position
+        # divides camera-frame coords by the court borders, and the result
+        # almost never hits 0 by coincidence. The substitution stays local
+        # to this block; the original pos tensor is what gets shifted later.
+        #
+        # At the current cap_y = 0.05, the cap is smaller than the bounds
+        # on most clips, so the cap is what limits the shift, not the
+        # bounds. The bounds only become the active constraint if cap_y
+        # is raised.
+        is_sentinel = (pos == 0.0).all(dim=-1)  # (n, t, m)
+        pos_for_max = pos.masked_fill(is_sentinel.unsqueeze(-1), float('-inf'))
+        pos_for_min = pos.masked_fill(is_sentinel.unsqueeze(-1), float('+inf'))
 
-        x_all = pos[..., 0]              # (n, t, m)
-        x_max = x_all.amax(dim=(1, 2))   # (n,)
-        x_min = x_all.amin(dim=(1, 2))
+        y_top_max = pos_for_max[:, :, 0, 1].amax(dim=1)  # (n,)
+        y_top_min = pos_for_min[:, :, 0, 1].amin(dim=1)
+        y_bot_max = pos_for_max[:, :, 1, 1].amax(dim=1)
+        y_bot_min = pos_for_min[:, :, 1, 1].amin(dim=1)
+
+        x_max = pos_for_max[..., 0].amax(dim=(1, 2))     # (n,)
+        x_min = pos_for_min[..., 0].amin(dim=(1, 2))
 
         eps = self.eps
         large = torch.full_like(y_top_max, float('inf'))
@@ -341,11 +385,14 @@ class ConstrainedJitter:
 
         # Shuttle out-of-bounds post-shift -> zero, mirroring TrackNet's
         # off-screen sentinel so the model recognises induced off-screen
-        # the same way it handles natural off-screen.
+        # the same way it handles natural off-screen. Count only OOB frames
+        # that weren't already a pre-shift sentinel zero, so the OOB rate
+        # reflects aug-induced off-screen and not the natural baseline.
         shuttle_oob = (
             (shuttle_shifted < 0.0).any(dim=-1)
             | (shuttle_shifted > 1.0).any(dim=-1)
         )
+        oob_aug_induced = shuttle_oob & ~shuttle_zero  # (n, t)
         shuttle_shifted = torch.where(
             shuttle_oob.unsqueeze(-1).expand_as(shuttle_shifted),
             torch.zeros_like(shuttle_shifted),
@@ -357,4 +404,14 @@ class ConstrainedJitter:
         effective = roll_mask & non_degenerate
         n_effective = int(effective.sum().item())
 
-        return human_pose, pos_shifted, shuttle_shifted, n_effective
+        # OOB rate metric: clips that fired an effective shift AND had at
+        # least one previously-real shuttle frame land off-screen due to
+        # the shift. Diagnostic for the trade-off the doc flags around
+        # cap_x and edge-of-frame shuttle classes (cross_court_net_shot,
+        # rush trajectories). A high rate suggests cap_x is wide enough
+        # to be replacing a meaningful fraction of real shuttle observations
+        # with the (0, 0) sentinel during training.
+        clip_had_oob = oob_aug_induced.any(dim=-1)  # (n,)
+        n_oob = int((effective & clip_had_oob).sum().item())
+
+        return human_pose, pos_shifted, shuttle_shifted, n_effective, n_oob
