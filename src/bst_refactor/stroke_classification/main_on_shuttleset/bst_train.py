@@ -29,8 +29,8 @@ import sys
 import yaml
 
 from preparing_data.shuttleset_dataset import prepare_npy_collated_loaders, \
-                                              RandomTranslation_batch, \
                                               pad_class_labels
+from preparing_data.augmentations import CoupledFlip, ConstrainedJitter
 from result_utils import show_f1_results, plot_confusion_matrix
 from pipeline.config import (
     TAXONOMIES,
@@ -70,6 +70,7 @@ Hyp = namedtuple('Hyp', [
     'use_aux_schedule', 'aux_fade_end_epoch',
     'clips_csv', 'split_column', 'drop_unknown', 'ablation_id',
     'label_smoothing', 'class_weights', 'adaptive_focal',
+    'augmentation',
     'expected_active_classes',
 ])
 hyp = Hyp(
@@ -123,6 +124,18 @@ hyp = Hyp(
         'warm_up_epochs': 5,
         'f1_floor': 0.0,
     },
+    # Train-time augmentations. Replaces the inherited (broken) joints-only
+    # RandomTranslation_batch. Flip is the literature-norm dataset-doubler;
+    # constrained jitter is the corrected, pos+shuttle-only,
+    # layered-conditional-bound formulation. Full design + verified code
+    # traces in scratch/architecture_notes/augmentation_framework.md.
+    augmentation={
+        'p_flip':   0.5,
+        'p_jitter': 0.3,
+        'cap_y':    0.05,
+        'cap_x':    0.10,
+        'eps':      0.15,
+    },
     # Optional belt-and-braces lever: when non-None, the empirical active class list
     # derived from train labels gets asserted equal to this. Mismatch raises with
     # both lists side-by-side. Default None means "trust the data".
@@ -160,14 +173,14 @@ def aux_schedule_factor(epoch: int, fade_end_epoch: int) -> float:
 def train_one_epoch(
     model: nn.Module,
     loader,
-    random_shift_fn,
-    n_bones: int,
+    coupled_flip: CoupledFlip,
+    constrained_jitter: ConstrainedJitter,
     n_classes: int,
     loss_fn,
     optimizer: optim.Optimizer,
     scheduler: optim.lr_scheduler.LambdaLR,  # learning rate scheduler
     device,
-) -> tuple[float, Tensor, Tensor, Tensor]:
+) -> tuple[float, Tensor, Tensor, Tensor, int, int, int]:
     """Train for one epoch, accumulating per-class TP / FP / FN alongside loss.
 
     Per-class counts feed ``AdaptiveFocalLoss.update_alpha`` at the call site.
@@ -175,14 +188,29 @@ def train_one_epoch(
     accumulated even when the loss has no use for them, so the train loop
     keeps a uniform return signature regardless of which loss is active.
 
-    :return: ``(train_loss, tp, fp, fn)``; counts are length-``n_classes``
-        int64 tensors on ``device``.
+    Augmentations fire flip-then-jitter per the framework doc. Both ops
+    roll independently per-clip so within a batch some clips are
+    flipped, some jittered, some both, some neither. Jitter accumulates
+    two diagnostic counters across the epoch:
+
+    - ``jitter_n_effective``: clips that received a non-zero shift, for
+      ``Aug/jitter_effective_rate`` (case-1 dropout indicator).
+    - ``jitter_n_oob``: clips whose effective shift pushed at least one
+      previously-real shuttle frame off-screen, triggering the
+      ``(0, 0)`` sentinel; for ``Aug/shuttle_oob_rate``.
+
+    :return: ``(train_loss, tp, fp, fn, jitter_n_effective, jitter_n_oob,
+        jitter_n_total)``. Counts are length-``n_classes`` int64 tensors on
+        ``device``; jitter accumulators are plain ints over the epoch's clips.
     """
     model.train()  # enable dropout + batchnorm training mode (TF: training=True)
     total_loss = 0.0
     tp = torch.zeros(n_classes, dtype=torch.long, device=device)
     fp = torch.zeros(n_classes, dtype=torch.long, device=device)
     fn = torch.zeros(n_classes, dtype=torch.long, device=device)
+    jitter_n_effective = 0
+    jitter_n_oob = 0
+    jitter_n_total = 0
 
     for (human_pose, pos, shuttle), video_len, labels in loader:
         # .to(device) = move tensors to GPU/CPU. TF does this automatically;
@@ -193,16 +221,18 @@ def train_one_epoch(
         video_len: Tensor = video_len.to(device)
         labels: Tensor = labels.to(device)
 
-        # Apply random translation augmentation to joints only (not bones,
-        # because bone vectors are relative and translation-invariant)
-        if n_bones == 0:
-            human_pose = random_shift_fn(human_pose)
-        else:
-            joints = human_pose[:, :, :, :-n_bones, :].contiguous()
-            bones = human_pose[:, :, :, -n_bones:, :]
-
-            joints = random_shift_fn(joints)
-            human_pose = torch.cat([joints, bones], dim=-2)
+        # Augmentations: flip first (clean spatial transform), then jitter.
+        # Each rolls independently per-clip; coupled_flip mirrors all three
+        # streams in their own coord frames and recomputes bones from the
+        # post-flip+post-swap joints; constrained_jitter shifts pos+shuttle
+        # only with layered-conditional bounds and zero-frame preservation.
+        human_pose, pos, shuttle = coupled_flip(human_pose, pos, shuttle)
+        human_pose, pos, shuttle, n_eff, n_oob = constrained_jitter(
+            human_pose, pos, shuttle,
+        )
+        jitter_n_effective += n_eff
+        jitter_n_oob += n_oob
+        jitter_n_total += human_pose.shape[0]
 
         # Flatten last two dims (joints/bones, xy) into one feature dim for the model
         human_pose = human_pose.view(*human_pose.shape[:-2], -1)
@@ -229,7 +259,7 @@ def train_one_epoch(
             fn += batch_fn
 
     train_loss = total_loss / len(loader)
-    return train_loss, tp, fp, fn
+    return train_loss, tp, fp, fn, jitter_n_effective, jitter_n_oob, jitter_n_total
 
 
 @torch.no_grad()  # disables gradient computation — saves memory during eval
@@ -372,7 +402,39 @@ def train_network(
     # TB folders pair with the run they came from. Default SummaryWriter() writes
     # to ./runs/<host_time>/, which is what older runs used.
     writer = SummaryWriter(log_dir=str(tb_dir)) if tb_dir is not None else SummaryWriter()
-    random_shift_fn = RandomTranslation_batch()  # data augmentation: small xy shifts
+
+    # Locked Task-2 augmentation set: centreline flip across all three streams
+    # (with COCO bilateral joint-index swap and bone recompute) plus
+    # constrained pos+shuttle jitter (layered conditional bounds, joints
+    # untouched). Bone recompute requires the JnB_bone pose style; other
+    # styles (J_only, JnB_interp, Jn2B) need their own recompute helpers
+    # which are out of scope per scratch/architecture_notes/augmentation_framework.md.
+    if hyp.pose_style != 'JnB_bone':
+        raise NotImplementedError(
+            f'Augmentation framework currently supports pose_style=JnB_bone only; '
+            f'got {hyp.pose_style!r}. Bone recompute via the bone_pairs table is the '
+            f'mechanism that propagates the flip+swap into bones; J_only has no bones, '
+            f'JnB_interp uses joint-pair midpoints, Jn2B uses both. Lift the equivalents '
+            f'to torch in preparing_data/augmentations.py before re-enabling the others.'
+        )
+    aug_cfg = hyp.augmentation
+    coupled_flip = CoupledFlip(
+        p=aug_cfg.get('p_flip', 0.5),
+        n_joints=17,
+        n_bones=n_bones,
+    )
+    constrained_jitter = ConstrainedJitter(
+        p_roll=aug_cfg.get('p_jitter', 0.2),
+        cap_y=aug_cfg.get('cap_y', 0.05),
+        cap_x=aug_cfg.get('cap_x', 0.10),
+        eps=aug_cfg.get('eps', 0.15),
+    )
+    print(
+        f"[aug] coupled flip p={coupled_flip.p}, "
+        f"constrained jitter p={constrained_jitter.p_roll} "
+        f"(cap_y={constrained_jitter.cap_y}, cap_x={constrained_jitter.cap_x}, "
+        f"eps={constrained_jitter.eps})"
+    )
 
     # label_smoothing softens targets from [0,1] to reduce overconfidence.
     # BST paper / TemPose default is 0.1; we sweep this knob to test
@@ -482,11 +544,12 @@ def train_network(
         model.set_schedule_factors(cg_factor=aux_factor, ap_factor=aux_factor)
 
         t0 = time.time()
-        train_loss, train_tp, train_fp, train_fn = train_one_epoch(
+        train_loss, train_tp, train_fp, train_fn, \
+            jitter_n_eff, jitter_n_oob, jitter_n_total = train_one_epoch(
             model=model,
             loader=train_loader,
-            random_shift_fn=random_shift_fn,
-            n_bones=n_bones,
+            coupled_flip=coupled_flip,
+            constrained_jitter=constrained_jitter,
             n_classes=n_classes,
             loss_fn=loss_fn,
             optimizer=optimizer,
@@ -534,6 +597,24 @@ def train_network(
         writer.add_scalar('F1_train/macro', train_per_class_f1.mean().item(), epoch)
         writer.add_scalar('F1_train/min', train_per_class_f1.min().item(), epoch)
         writer.add_scalar('Schedule/aux_factor', aux_factor, epoch)
+        # Jitter effective rate: fraction of clips that rolled yes AND had at
+        # least one non-degenerate axis. Watching this scalar shows whether the
+        # case-1 (fully-degenerate envelope) skip rate is eating into the
+        # nominal p_jitter target. See augmentation_framework.md.
+        jitter_effective_rate = (
+            jitter_n_eff / jitter_n_total if jitter_n_total > 0 else 0.0
+        )
+        writer.add_scalar('Aug/jitter_effective_rate', jitter_effective_rate, epoch)
+        # Shuttle OOB rate: fraction of clips where the effective shift
+        # pushed a previously-real shuttle frame off-screen, triggering the
+        # (0, 0) sentinel. Diagnostic for the cap_x trade-off the doc flags
+        # around edge-of-frame shuttle classes (cross_court_net_shot, rush
+        # trajectories). High rate = cap_x is replacing a meaningful fraction
+        # of real shuttle observations with the off-screen sentinel.
+        shuttle_oob_rate = (
+            jitter_n_oob / jitter_n_total if jitter_n_total > 0 else 0.0
+        )
+        writer.add_scalar('Aug/shuttle_oob_rate', shuttle_oob_rate, epoch)
         for i, c in enumerate(class_ls):
             writer.add_scalar(f'F1_train/{c}', train_per_class_f1[i].item(), epoch)
             if isinstance(loss_fn, AdaptiveFocalLoss):
