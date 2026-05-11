@@ -201,8 +201,14 @@ def _read_manifest(run_dir: Path) -> dict:
 
 
 def _write_manifest(run_dir: Path, manifest: dict) -> None:
-    with open(_manifest_path(run_dir), 'w') as f:
+    # Atomic write so concurrent readers (e.g. hparam_sweep wrapper polling
+    # the manifest after a per-serial bst_train invocation) never see a
+    # half-written file.
+    target = _manifest_path(run_dir)
+    tmp = target.with_suffix('.yaml.tmp')
+    with open(tmp, 'w') as f:
         yaml.safe_dump(manifest, f, sort_keys=False, default_flow_style=False)
+    os.replace(tmp, target)
 
 
 def mirror_to_aim(

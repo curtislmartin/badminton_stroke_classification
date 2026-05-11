@@ -861,10 +861,10 @@ def collate_npy(
             shuttle = shuttle[:min_t]
             failed = failed[:min_t]
 
-        # Zero shuttle coords on frames where pose detection failed. The clip
-        # is still included -- no samples are dropped based on failed frames.
-        if np.any(failed):
-            shuttle[failed, :] = 0
+        # Pose-fail frames no longer wipe shuttle. Pose tells you where a
+        # player is in the court; shuttle tells you where the bird is. If
+        # one player collapses, the bird's coord still has meaning.
+        # Full rationale: scratch/architecture_notes/frame_zeroing.md.
 
         shuttle_ls.append(shuttle)
 

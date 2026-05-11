@@ -21,6 +21,7 @@ from pathlib import Path
 from copy import deepcopy
 from collections import namedtuple
 from contextlib import redirect_stdout
+import argparse
 import math
 import time
 from datetime import datetime, timedelta
@@ -29,8 +30,8 @@ import sys
 import yaml
 
 from preparing_data.shuttleset_dataset import prepare_npy_collated_loaders, \
-                                              RandomTranslation_batch, \
                                               pad_class_labels
+from preparing_data.augmentations import CoupledFlip, ConstrainedJitter
 from result_utils import show_f1_results, plot_confusion_matrix
 from pipeline.config import (
     TAXONOMIES,
@@ -70,6 +71,7 @@ Hyp = namedtuple('Hyp', [
     'use_aux_schedule', 'aux_fade_end_epoch',
     'clips_csv', 'split_column', 'drop_unknown', 'ablation_id',
     'label_smoothing', 'class_weights', 'adaptive_focal',
+    'augmentation',
     'expected_active_classes',
 ])
 hyp = Hyp(
@@ -88,7 +90,7 @@ hyp = Hyp(
     clips_csv=str(DEFAULT_CLIPS_CSV),
     split_column='split_v2',
     drop_unknown=True,
-    ablation_id=None,
+    ablation_id='wipe_drop',
     label_smoothing=0.0,  # CDB-F1 cell forces LS=0; LS softens targets so confident-correct samples have p_t < 1.0, contaminating focal's per-sample hardness signal
     # Manual per-class CE weights for the wrist_smash <-> smash confusion-pair smoke test.
     # Pair-balanced (both at 2.0) so the gradient has no directional bias toward one class:
@@ -122,6 +124,18 @@ hyp = Hyp(
         'momentum': 0.9,
         'warm_up_epochs': 5,
         'f1_floor': 0.0,
+    },
+    # Train-time augmentations. Replaces the inherited (broken) joints-only
+    # RandomTranslation_batch. Flip is the literature-norm dataset-doubler;
+    # constrained jitter is the corrected, pos+shuttle-only,
+    # layered-conditional-bound formulation. Full design + verified code
+    # traces in scratch/architecture_notes/augmentation_framework.md.
+    augmentation={
+        'p_flip':   0.5,
+        'p_jitter': 0.3,
+        'cap_y':    0.05,
+        'cap_x':    0.10,
+        'eps':      0.15,
     },
     # Optional belt-and-braces lever: when non-None, the empirical active class list
     # derived from train labels gets asserted equal to this. Mismatch raises with
@@ -160,14 +174,14 @@ def aux_schedule_factor(epoch: int, fade_end_epoch: int) -> float:
 def train_one_epoch(
     model: nn.Module,
     loader,
-    random_shift_fn,
-    n_bones: int,
+    coupled_flip: CoupledFlip,
+    constrained_jitter: ConstrainedJitter,
     n_classes: int,
     loss_fn,
     optimizer: optim.Optimizer,
     scheduler: optim.lr_scheduler.LambdaLR,  # learning rate scheduler
     device,
-) -> tuple[float, Tensor, Tensor, Tensor]:
+) -> tuple[float, Tensor, Tensor, Tensor, int, int, int]:
     """Train for one epoch, accumulating per-class TP / FP / FN alongside loss.
 
     Per-class counts feed ``AdaptiveFocalLoss.update_alpha`` at the call site.
@@ -175,14 +189,29 @@ def train_one_epoch(
     accumulated even when the loss has no use for them, so the train loop
     keeps a uniform return signature regardless of which loss is active.
 
-    :return: ``(train_loss, tp, fp, fn)``; counts are length-``n_classes``
-        int64 tensors on ``device``.
+    Augmentations fire flip-then-jitter per the framework doc. Both ops
+    roll independently per-clip so within a batch some clips are
+    flipped, some jittered, some both, some neither. Jitter accumulates
+    two diagnostic counters across the epoch:
+
+    - ``jitter_n_effective``: clips that received a non-zero shift, for
+      ``Aug/jitter_effective_rate`` (case-1 dropout indicator).
+    - ``jitter_n_oob``: clips whose effective shift pushed at least one
+      previously-real shuttle frame off-screen, triggering the
+      ``(0, 0)`` sentinel; for ``Aug/shuttle_oob_rate``.
+
+    :return: ``(train_loss, tp, fp, fn, jitter_n_effective, jitter_n_oob,
+        jitter_n_total)``. Counts are length-``n_classes`` int64 tensors on
+        ``device``; jitter accumulators are plain ints over the epoch's clips.
     """
     model.train()  # enable dropout + batchnorm training mode (TF: training=True)
     total_loss = 0.0
     tp = torch.zeros(n_classes, dtype=torch.long, device=device)
     fp = torch.zeros(n_classes, dtype=torch.long, device=device)
     fn = torch.zeros(n_classes, dtype=torch.long, device=device)
+    jitter_n_effective = 0
+    jitter_n_oob = 0
+    jitter_n_total = 0
 
     for (human_pose, pos, shuttle), video_len, labels in loader:
         # .to(device) = move tensors to GPU/CPU. TF does this automatically;
@@ -193,16 +222,18 @@ def train_one_epoch(
         video_len: Tensor = video_len.to(device)
         labels: Tensor = labels.to(device)
 
-        # Apply random translation augmentation to joints only (not bones,
-        # because bone vectors are relative and translation-invariant)
-        if n_bones == 0:
-            human_pose = random_shift_fn(human_pose)
-        else:
-            joints = human_pose[:, :, :, :-n_bones, :].contiguous()
-            bones = human_pose[:, :, :, -n_bones:, :]
-
-            joints = random_shift_fn(joints)
-            human_pose = torch.cat([joints, bones], dim=-2)
+        # Augmentations: flip first (clean spatial transform), then jitter.
+        # Each rolls independently per-clip; coupled_flip mirrors all three
+        # streams in their own coord frames and recomputes bones from the
+        # post-flip+post-swap joints; constrained_jitter shifts pos+shuttle
+        # only with layered-conditional bounds and zero-frame preservation.
+        human_pose, pos, shuttle = coupled_flip(human_pose, pos, shuttle)
+        human_pose, pos, shuttle, n_eff, n_oob = constrained_jitter(
+            human_pose, pos, shuttle,
+        )
+        jitter_n_effective += n_eff
+        jitter_n_oob += n_oob
+        jitter_n_total += human_pose.shape[0]
 
         # Flatten last two dims (joints/bones, xy) into one feature dim for the model
         human_pose = human_pose.view(*human_pose.shape[:-2], -1)
@@ -229,7 +260,7 @@ def train_one_epoch(
             fn += batch_fn
 
     train_loss = total_loss / len(loader)
-    return train_loss, tp, fp, fn
+    return train_loss, tp, fp, fn, jitter_n_effective, jitter_n_oob, jitter_n_total
 
 
 @torch.no_grad()  # disables gradient computation — saves memory during eval
@@ -372,7 +403,39 @@ def train_network(
     # TB folders pair with the run they came from. Default SummaryWriter() writes
     # to ./runs/<host_time>/, which is what older runs used.
     writer = SummaryWriter(log_dir=str(tb_dir)) if tb_dir is not None else SummaryWriter()
-    random_shift_fn = RandomTranslation_batch()  # data augmentation: small xy shifts
+
+    # Locked Task-2 augmentation set: centreline flip across all three streams
+    # (with COCO bilateral joint-index swap and bone recompute) plus
+    # constrained pos+shuttle jitter (layered conditional bounds, joints
+    # untouched). Bone recompute requires the JnB_bone pose style; other
+    # styles (J_only, JnB_interp, Jn2B) need their own recompute helpers
+    # which are out of scope per scratch/architecture_notes/augmentation_framework.md.
+    if hyp.pose_style != 'JnB_bone':
+        raise NotImplementedError(
+            f'Augmentation framework currently supports pose_style=JnB_bone only; '
+            f'got {hyp.pose_style!r}. Bone recompute via the bone_pairs table is the '
+            f'mechanism that propagates the flip+swap into bones; J_only has no bones, '
+            f'JnB_interp uses joint-pair midpoints, Jn2B uses both. Lift the equivalents '
+            f'to torch in preparing_data/augmentations.py before re-enabling the others.'
+        )
+    aug_cfg = hyp.augmentation
+    coupled_flip = CoupledFlip(
+        p=aug_cfg.get('p_flip', 0.5),
+        n_joints=17,
+        n_bones=n_bones,
+    )
+    constrained_jitter = ConstrainedJitter(
+        p_roll=aug_cfg.get('p_jitter', 0.2),
+        cap_y=aug_cfg.get('cap_y', 0.05),
+        cap_x=aug_cfg.get('cap_x', 0.10),
+        eps=aug_cfg.get('eps', 0.15),
+    )
+    print(
+        f"[aug] coupled flip p={coupled_flip.p}, "
+        f"constrained jitter p={constrained_jitter.p_roll} "
+        f"(cap_y={constrained_jitter.cap_y}, cap_x={constrained_jitter.cap_x}, "
+        f"eps={constrained_jitter.eps})"
+    )
 
     # label_smoothing softens targets from [0,1] to reduce overconfidence.
     # BST paper / TemPose default is 0.1; we sweep this knob to test
@@ -482,11 +545,12 @@ def train_network(
         model.set_schedule_factors(cg_factor=aux_factor, ap_factor=aux_factor)
 
         t0 = time.time()
-        train_loss, train_tp, train_fp, train_fn = train_one_epoch(
+        train_loss, train_tp, train_fp, train_fn, \
+            jitter_n_eff, jitter_n_oob, jitter_n_total = train_one_epoch(
             model=model,
             loader=train_loader,
-            random_shift_fn=random_shift_fn,
-            n_bones=n_bones,
+            coupled_flip=coupled_flip,
+            constrained_jitter=constrained_jitter,
             n_classes=n_classes,
             loss_fn=loss_fn,
             optimizer=optimizer,
@@ -534,6 +598,24 @@ def train_network(
         writer.add_scalar('F1_train/macro', train_per_class_f1.mean().item(), epoch)
         writer.add_scalar('F1_train/min', train_per_class_f1.min().item(), epoch)
         writer.add_scalar('Schedule/aux_factor', aux_factor, epoch)
+        # Jitter effective rate: fraction of clips that rolled yes AND had at
+        # least one non-degenerate axis. Watching this scalar shows whether the
+        # case-1 (fully-degenerate envelope) skip rate is eating into the
+        # nominal p_jitter target. See augmentation_framework.md.
+        jitter_effective_rate = (
+            jitter_n_eff / jitter_n_total if jitter_n_total > 0 else 0.0
+        )
+        writer.add_scalar('Aug/jitter_effective_rate', jitter_effective_rate, epoch)
+        # Shuttle OOB rate: fraction of clips where the effective shift
+        # pushed a previously-real shuttle frame off-screen, triggering the
+        # (0, 0) sentinel. Diagnostic for the cap_x trade-off the doc flags
+        # around edge-of-frame shuttle classes (cross_court_net_shot, rush
+        # trajectories). High rate = cap_x is replacing a meaningful fraction
+        # of real shuttle observations with the off-screen sentinel.
+        shuttle_oob_rate = (
+            jitter_n_oob / jitter_n_total if jitter_n_total > 0 else 0.0
+        )
+        writer.add_scalar('Aug/shuttle_oob_rate', shuttle_oob_rate, epoch)
         for i, c in enumerate(class_ls):
             writer.add_scalar(f'F1_train/{c}', train_per_class_f1[i].item(), epoch)
             if isinstance(loss_fn, AdaptiveFocalLoss):
@@ -913,6 +995,72 @@ def _validate_and_record_arch(
 # ==========================================================================
 
 if __name__ == '__main__':
+    # CLI is wrapper-friendly: hparam_sweep.py drives per-serial invocations
+    # by setting --serial-no with a fixed --run-id and --log-path so all five
+    # serials share a run dir and a single test log. Manual invocations leave
+    # everything unset to fall back to the module-level Hyp defaults plus a
+    # fresh timestamped run dir / log file.
+    parser = argparse.ArgumentParser(
+        description='BST training entry point. CLI flags exist mainly for the '
+                    'hparam_sweep wrapper; running with no flags trains a full '
+                    '5-serial run from the module-level Hyp defaults.',
+    )
+    parser.add_argument(
+        '--serial-no', type=int, default=None,
+        help='Run only this serial (1-5) and exit. Used by hparam_sweep to '
+             'pause between serials for kill checks. Requires --log-path and '
+             '--run-id when serial-no > 1.',
+    )
+    parser.add_argument(
+        '--run-id', type=str, default=None,
+        help='Resume into an existing experiments/<run_id>/ dir. Required when '
+             '--serial-no > 1; optional otherwise (a fresh run_<timestamp> is '
+             'minted if absent).',
+    )
+    parser.add_argument(
+        '--log-path', type=str, default=None,
+        help='Pin the test log file path. Required when --serial-no > 1 so all '
+             'serials append to the same log file. Without it, each invocation '
+             'creates a fresh test_logs/test_<timestamp>.log.',
+    )
+    parser.add_argument('--p-flip', type=float, default=None)
+    parser.add_argument('--p-jitter', type=float, default=None)
+    parser.add_argument('--cap-y', type=float, default=None)
+    parser.add_argument('--cap-x', type=float, default=None)
+    parser.add_argument('--eps', type=float, default=None)
+    args = parser.parse_args()
+
+    # Per-serial invocation contract: pass all three sharing-flags together so
+    # the five invocations land in one run dir with one continuous log file.
+    if args.serial_no is not None:
+        if not (1 <= args.serial_no <= 5):
+            raise ValueError(
+                f'--serial-no must be 1-5, got {args.serial_no!r}.'
+            )
+        if args.serial_no > 1 and (args.log_path is None or args.run_id is None):
+            raise ValueError(
+                '--serial-no > 1 requires both --log-path and --run-id so '
+                'subsequent serials append to the same log and share the run dir.'
+            )
+
+    # Augmentation CLI overrides are all-or-nothing. Wrapper passes the full
+    # cell-config dict (base + overrides resolved); manual invocations leave
+    # them all None and use the module-level Hyp defaults.
+    aug_overrides = [args.p_flip, args.p_jitter, args.cap_y, args.cap_x, args.eps]
+    if any(x is not None for x in aug_overrides):
+        if not all(x is not None for x in aug_overrides):
+            raise ValueError(
+                'Augmentation CLI overrides must be all-or-nothing. Pass either '
+                'all five (--p-flip --p-jitter --cap-y --cap-x --eps) or none.'
+            )
+        hyp = hyp._replace(augmentation={
+            'p_flip':   args.p_flip,
+            'p_jitter': args.p_jitter,
+            'cap_y':    args.cap_y,
+            'cap_x':    args.cap_x,
+            'eps':      args.eps,
+        })
+
     taxonomy = TAXONOMIES[hyp.taxonomy]
 
     # Collated dir naming via shared helper (mirrored on the prepare_train
@@ -969,7 +1117,7 @@ if __name__ == '__main__':
     # work begins, so the original is always recoverable. Test logs are
     # safe regardless: each invocation gets a fresh timestamped log file.
     # ----------------------------------------------------------------------
-    resume_from: str | None = None
+    resume_from: str | None = args.run_id
 
     timestamp = f'{datetime.now():%Y%m%d_%H%M%S}'
     run_id = resume_from or f'run_{timestamp}'
@@ -986,7 +1134,7 @@ if __name__ == '__main__':
     script_dir = Path(__file__).resolve().parent
     log_dir = script_dir / 'test_logs'
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f'test_{timestamp}.log'
+    log_path = Path(args.log_path) if args.log_path else log_dir / f'test_{timestamp}.log'
     experiments_dir = script_dir / 'experiments'
 
     # Resume mutates manifest.yaml on serial 1 (see _validate_and_record_arch).
@@ -1038,9 +1186,30 @@ if __name__ == '__main__':
                 'fail on shape mismatch for v1/nosides/raw_35 dropunk weights.'
             )
 
-    with open(log_path, 'w') as log_f:
+    # Per-serial invocation: run only the requested serial. Otherwise loop 1-5
+    # as before. Log open mode flips to append for serial-no > 1 so the second
+    # through fifth invocations don't clobber the S1 block.
+    if args.serial_no is not None:
+        serial_range = range(args.serial_no, args.serial_no + 1)
+        log_open_mode = 'a' if args.serial_no > 1 else 'w'
+    else:
+        serial_range = range(1, 6)
+        log_open_mode = 'w'
+
+    # Arch validation gate: skip if the manifest already carries an arch block.
+    # This handles per-serial invocations (S2-S5 skip because S1 already
+    # validated) and resumed cells (skip if arch was preserved). Fresh runs
+    # and resumed-without-arch cells fall through and validate.
+    arch_already_present = False
+    manifest_path_check = run_dir / 'manifest.yaml'
+    if manifest_path_check.exists():
+        with open(manifest_path_check) as f:
+            existing_manifest = yaml.safe_load(f) or {}
+        arch_already_present = 'arch' in existing_manifest.get('extra', {})
+
+    with open(log_path, log_open_mode) as log_f:
         tee = Tee(sys.stdout, log_f)
-        for serial_no in range(1, 6):
+        for serial_no in serial_range:
             print(f'Running serial {serial_no} ...')
             task = Task(
                 n_joints=17, taxonomy=taxonomy, weight_dir=weight_dir,
@@ -1051,12 +1220,11 @@ if __name__ == '__main__':
                 train_partial=hyp.train_partial
             )
 
-            # First-serial-only: surface the live arch derivation, run the
+            # Validate arch the first time in this invocation if not already
+            # validated. Surfaces the live arch derivation, runs the
             # expected_active_classes lever and the resume cross-check, and
-            # write the arch block into the manifest. Subsequent serials use
-            # the same dir, so the derivation is deterministic and we just
-            # don't repeat the manifest write.
-            if serial_no == 1:
+            # writes the arch block into the manifest.
+            if not arch_already_present:
                 _validate_and_record_arch(
                     run_dir=run_dir,
                     task=task,
@@ -1065,6 +1233,7 @@ if __name__ == '__main__':
                     resumed_manifest_arch=resumed_manifest_arch,
                     tee=tee,
                 )
+                arch_already_present = True
 
             task.get_network_architecture(model_name='BST_CG_AP', in_channels=(3 if hyp.use_3d_pose else 2))
 
